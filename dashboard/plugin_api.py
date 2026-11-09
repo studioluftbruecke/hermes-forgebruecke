@@ -1,0 +1,111 @@
+"""Backend routes for the Forgebrücke desk, mounted at `/api/plugins/forgebruecke/`.
+
+    GET  /desk[?refresh=true]         rows (one per open PR with a flow), counts, repo cards; 15 s cache
+    GET  /settings[?refresh=true]     the three key fields (set or not, whose account, scopes), the
+                                      capability registry's features, the setups, the profiles; 60 s cache
+    POST /merge                       {repo, number, head_sha}: the merge button, with the write token of
+                                      your account, only when the registry says it can merge
+    POST /reviewer-profile            the N20 fallback: create `forgebruecke-reviewer` (or the command)
+
+The handlers are `desk.py`'s `api_*` functions; this file only adapts them to FastAPI. Hermes loads it
+as a standalone module, so the plugin folder is loaded here as a package by path. Settings come from
+the profile config (`plugins.entries.forgebruecke.settings`), secrets from Hermes' secret scope. The
+flow state is the agent half's data folder (`ctx.state.data_dir`, the portable namespace
+`agent-plugin-forgebruecke-<digest>`), resolved per call so it follows the active profile.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import sys
+from pathlib import Path
+from typing import Any, Optional
+
+from fastapi import APIRouter, Body, Query
+from fastapi.responses import JSONResponse
+
+PLUGIN = "forgebruecke"
+_PACKAGE = "hermes_forgebruecke_dashboard"
+
+router = APIRouter()
+
+
+def _plugin():
+    module = sys.modules.get(_PACKAGE)
+    if module is not None:
+        return module
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(_PACKAGE, root / "__init__.py",
+                                                  submodule_search_locations=[str(root)])
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load the {PLUGIN} package")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[_PACKAGE] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _desk():
+    _plugin()
+    return importlib.import_module(f"{_PACKAGE}.desk")
+
+
+def _get_setting(key: str, default: Any = None) -> Any:
+    from hermes_cli.config import load_config_readonly
+
+    entries = ((load_config_readonly() or {}).get("plugins") or {}).get("entries") or {}
+    settings = (entries.get(PLUGIN) or {}).get("settings") or {}
+    return settings.get(key, default)
+
+
+def _get_secret(name: str) -> Optional[str]:
+    from agent.secret_scope import get_secret
+
+    return get_secret(name)
+
+
+def _home() -> Path:
+    from hermes_constants import get_hermes_home
+
+    return Path(get_hermes_home())
+
+
+def _data_dir() -> Optional[Path]:
+    """The agent half's data folder: the same name Hermes gives `ctx.state.data_dir`."""
+    try:
+        from hermes_cli.plugins_manifest import _portable_data_namespace
+
+        name = _portable_data_namespace(PLUGIN)
+    except Exception:  # an older Hermes: the same rule, by hand
+        name = f"agent-plugin-{PLUGIN}-{hashlib.sha256(PLUGIN.encode()).hexdigest()[:8]}"
+    path = _home() / "plugin-data" / name
+    return path if path.is_dir() else None
+
+
+def _reply(result: "tuple[int, dict]") -> JSONResponse:
+    status, body = result
+    return JSONResponse(body, status_code=status)
+
+
+# Sync handlers: FastAPI runs them on a worker thread, so a slow forge never blocks the loop.
+
+@router.get("/desk")
+def desk(refresh: bool = Query(False)) -> JSONResponse:
+    return _reply(_desk().api_desk(_get_setting, _get_secret, data_dir=_data_dir(), refresh=refresh))
+
+
+@router.get("/settings")
+def settings(refresh: bool = Query(False)) -> JSONResponse:
+    return _reply(_desk().api_settings(_get_setting, _get_secret, refresh=refresh, home=_home()))
+
+
+@router.post("/merge")
+def merge(body: dict = Body(...)) -> JSONResponse:
+    return _reply(_desk().api_merge(_get_setting, _get_secret, body, data_dir=_data_dir()))
+
+
+@router.post("/reviewer-profile")
+def reviewer_profile(body: dict = Body(default={})) -> JSONResponse:
+    home, d = _home(), _desk()
+    return _reply(d.api_create_reviewer(body, source=d._mod("profile").current_name(home), home=home))
