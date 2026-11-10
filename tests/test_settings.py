@@ -143,5 +143,5 @@ def test_the_manifest_drops_the_retired_fields_adds_you_and_says_the_write_token
     assert "Every agent shell on the Hermes host can read this token and could merge into main as you" in owner
     owner_row = next(t for t in sub("capabilities").TOKENS if t["role"] == "owner")
     assert "could merge into main as you" in owner_row["risk"]
-    assert re.search(r'^version: "0\.0\.16"$', manifest, re.M)
-    assert '"version": "0.0.16"' in (ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8")
+    assert re.search(r'^version: "0\.0\.17"$', manifest, re.M)
+    assert '"version": "0.0.17"' in (ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8")

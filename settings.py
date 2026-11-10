@@ -11,7 +11,9 @@ Shapes:
 - ``Settings``: every non-secret setting from ``config_schema``, already validated, plus the
   ``warnings`` produced while validating (an invalid value falls back to its default and says so).
   ``you`` is the user's own Forgejo login: the desk's Waiting for me lists the pull requests that
-  request his review, and ``forgejo_create_pr`` requests his review by default.
+  request his review, and ``forgejo_create_pr`` requests his review by default. With
+  ``review_every_pr`` (on by default) the flows tick asks him on every other open pull request too, and
+  the desk lists one that does not ask him yet (``review_requests.py``, D33).
 - ``Credentials(token, owner_token)``: the agent account's token (required) and an optional write token
   of the user's own account (only the desk's Merge button, on his click, D30). Their ``repr`` never
   shows a value, and nothing in this plugin logs them. Which token a call uses is decided by its lane
@@ -55,6 +57,7 @@ DEFAULTS: dict = {
     "learn_mode": False,
     "default_review_profile": "",  # empty: the profile Forgebrücke runs in
     "dry_run": True,
+    "review_every_pr": True,
 }
 
 SettingGetter = Callable[[str, Any], Any]
@@ -88,6 +91,7 @@ class Settings:
     learn_mode: bool = False
     default_review_profile: str = ""
     dry_run: bool = True
+    review_every_pr: bool = True
     warnings: tuple = field(default=(), compare=False)
 
     def rule_for(self, repo: str) -> Rule:
@@ -106,7 +110,7 @@ class Settings:
                 "mention_authors": list(self.mention_authors), "writes": [r.to_dict() for r in self.writes],
                 "flows_path": self.flows_path, "audit_enabled": self.audit_enabled,
                 "learn_mode": self.learn_mode, "default_review_profile": self.default_review_profile,
-                "dry_run": self.dry_run}
+                "dry_run": self.dry_run, "review_every_pr": self.review_every_pr}
 
 
 class Credentials:
@@ -266,5 +270,6 @@ def load_settings(get_setting: SettingGetter, here: Optional[Callable[[], str]] 
         learn_mode=_as_bool("learn_mode", raw("learn_mode"), w),
         default_review_profile=profile,
         dry_run=_as_bool("dry_run", raw("dry_run"), w),
+        review_every_pr=_as_bool("review_every_pr", raw("review_every_pr"), w),
         warnings=tuple(w),
     )

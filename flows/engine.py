@@ -18,8 +18,9 @@ PRODUCT.md § Rules the engine enforces, as code:
 Unattended by nature: the engine does not call the agent's write tools (those refuse unattended runs). It
 writes through ``FlowWriter``, which can do exactly what a flow names for a gate: a status in the flow's
 own namespace, the one status comment per PR (edited in place), a notify comment, and, in ``promote``
-only, opening and merging a pull request into the unprotected branch the flow names. With ``dry_run`` on
-it records those writes and sends nothing.
+only, opening and merging a pull request into the unprotected branch the flow names. Outside any flow, a
+tick also asks ``you`` to review every open pull request that does not ask yet (``review_requests.py``,
+D33). With ``dry_run`` on it records those writes and sends nothing.
 """
 from __future__ import annotations
 
@@ -77,6 +78,11 @@ class FlowWriter:
         if self.dry_run:
             return None
         return (self._client().post(f"/repos/{repo}/issues/{number}/comments", {"body": body}).data or {}).get("id")
+
+    def request_review(self, repo: str, number: int, login: str) -> None:
+        self._record("review_request", repo=repo, number=number, reviewer=login)
+        if not self.dry_run:
+            self._client().post(f"/repos/{repo}/pulls/{number}/requested_reviewers", {"reviewers": [login]})
 
     def edit_comment(self, repo: str, comment_id: int, body: str) -> bool:
         """False when the comment cannot be edited, so the caller posts a new one and keeps its id: gone
@@ -159,7 +165,20 @@ class Engine:
                         report["errors"].append(f"{repo}#{st.get('pr')}: {type(e).__name__}: {getattr(e, 'message', e)}")
         if only and not report["prs"]:
             report["notes"].append(f"{only[0]}#{only[1]} is not an open pull request under an active flow")
+        if not only:
+            self._request_reviews(report)
         return report
+
+    def _request_reviews(self, report: dict) -> None:
+        writer = FlowWriter(self.access, "review", dry_run=self.settings.dry_run, log=self.writes)
+        try:
+            swept = _mod("review_requests").sweep(self.access, writer.request_review)
+        except Exception as e:  # the flow rows of this tick still count
+            report["errors"].append(f"review requests: {type(e).__name__}: {getattr(e, 'message', e)}")
+            return
+        report["review_requests"] = swept["requested"]
+        report["notes"] += swept["notes"]
+        report["errors"] += swept["errors"]
 
     # --- one pull request ----------------------------------------------------------------------
 

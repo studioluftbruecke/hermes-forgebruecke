@@ -153,6 +153,8 @@ def _cli_tick(args, get_setting: SettingGetter, get_secret: SecretGetter, state:
         for pr in report.get("prs", []):
             chain = "  ".join(f"{g['key']}={g['state']}" for g in pr["gates"])
             print(f"{pr['repo']}#{pr['pr']} @{pr['head']} [{pr['flow']}]  {chain}")
+        for ref in report.get("review_requests", []):
+            print(f"{ref}: asked {access.settings.you} to review")
         for line in report.get("notes", []) + report.get("errors", []):
             print(f"  {line}")
         print(f"{report.get('writes', 0)} write(s){' (dry run)' if report.get('dry_run') else ''}, "

@@ -30,6 +30,11 @@ def due(store, interval_s: float, now: Optional[float] = None) -> bool:
     return not isinstance(last, (int, float)) or now - last >= interval_s * 0.8
 
 
+def has_work(settings) -> bool:
+    """A tick has something to do: a repo runs a flow, or open pull requests should ask you (D33)."""
+    return any(r.flows for r in settings.writes) or bool(settings.review_every_pr and settings.you)
+
+
 def run_tick(access, data_dir: Any, source: str, only: Optional[tuple] = None, runner: Any = None) -> dict:
     store = _mod("flows.state").FlowStore(data_dir)
     return _mod("flows.engine").Engine(access, store, runner=runner, source=source).tick(only=only)
@@ -42,8 +47,8 @@ def channel_tick(settings, token: str, data_dir: Any, source: str = "channel") -
     store = _mod("flows.state").FlowStore(data_dir)
     if not due(store, settings.poll_interval):
         return None
-    if not any(r.flows for r in settings.writes):
-        return None  # no repo runs a flow: no forge traffic at all
+    if not has_work(settings):
+        return None  # no flow and nobody to ask: no forge traffic at all
     creds = _mod("settings").Credentials(token)
     access = _mod("access").Access(settings, creds)
     return run_tick(access, data_dir, source)
@@ -64,7 +69,7 @@ async def gateway_loop(load_access: Callable[[], Any], get_interval: Callable[[]
                     store.write_engine({"at": int(time.time()), "source": "gateway-loop", "ok": False,
                                         "errors": [f"no forge access in this context: {getattr(e, 'message', e)}"]})
                     access = None
-                if access is not None and any(r.flows for r in access.settings.writes):
+                if access is not None and has_work(access.settings):
                     await asyncio.to_thread(run_tick, access, data_dir, "gateway-loop")
         except asyncio.CancelledError:
             raise

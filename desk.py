@@ -20,10 +20,11 @@ Shapes (what the pane renders):
              never, risk?) plus what the probe found: set, login, scopes{} | null, error | null, is_admin, and
              renamed_from (the pre-0.0.12 name still holding a value while the new one is empty) | null
 
-Waiting for me (D28) = flow rows whose human gate waits for you, plus open pull requests whose
-``requested_reviewers`` contain the ``you`` setting: one issue search for open pull requests, then one pulls
-list per repo that has one (the search's items carry no reviewers; measured on Forgejo 15). Without ``you``
-the desk says so (``waiting_note``) and lists flow rows only.
+Waiting for me (D28, D33) = flow rows whose human gate waits for you, plus open pull requests whose
+``requested_reviewers`` contain the ``you`` setting, plus (with ``review_every_pr``, the default) open pull
+requests that should ask you and do not yet, marked "review not requested yet": the flows tick asks you
+there, and the row shows even when that write cannot happen. The scan and the rule live in
+``review_requests.py``. Without ``you`` the desk says so (``waiting_note``) and lists flow rows only.
 
 Lanes (M4b): the desk reads in the agent lane, with the agent token, so it sees exactly what Hermes' Forgejo
 account sees (D29). The merge button is the owner lane: his write token, on his click, and only when the
@@ -172,11 +173,6 @@ def repo_cards(access: Any, rows: list) -> list:
     return out
 
 
-MAX_REVIEW_REPOS = 30   # pulls lists per desk build
-MAX_SEARCH = 200        # open pull requests the search reads
-REVIEW_REASON = "review requested"
-
-
 def _epoch(iso: Any) -> Optional[int]:
     try:
         from datetime import datetime
@@ -185,43 +181,35 @@ def _epoch(iso: Any) -> Optional[int]:
         return None
 
 
-def review_rows(client: Any, you: str, known: set, can_merge: bool = False) -> "tuple[list, list]":
-    """Open pull requests whose ``requested_reviewers`` name ``you``, as Waiting rows without a flow, and notes
-    for what was cut or unreadable. ``known`` holds the ids of flow rows (a flow row wins). ``can_merge``: his
-    write token can merge, so the row offers the Merge button (0.0.15)."""
-    ForgejoError = _mod("client").ForgejoError
-    found = client.paginate("/repos/issues/search", {"type": "pulls", "state": "open"}, max_items=MAX_SEARCH)
-    repos: list = []
-    for item in found.items:
-        repo = (item.get("repository") or {}).get("full_name")
-        if repo and repo not in repos:
-            repos.append(repo)
-    notes = []
-    if found.has_more:
-        notes.append(f"Only the {MAX_SEARCH} most recent open pull requests were checked for review requests.")
-    if len(repos) > MAX_REVIEW_REPOS:
-        notes.append(f"Review requests were checked in {MAX_REVIEW_REPOS} of {len(repos)} repos with open pull requests.")
-        repos = repos[:MAX_REVIEW_REPOS]
+def review_rows(client: Any, you: str, known: set, can_merge: bool = False,
+                every_pr: bool = False) -> "tuple[list, list]":
+    """Open pull requests that ask ``you`` to review them, and with ``every_pr`` those that should and do not
+    yet (D33), as Waiting rows without a flow, plus notes for what was cut or unreadable. ``known`` holds the
+    ids of flow rows (a flow row wins). ``can_merge``: his write token can merge, so the row offers the Merge
+    button (0.0.15)."""
+    rr = _mod("review_requests")
+    pulls, notes = rr.open_pulls(client)
     rows = []
-    for repo in repos:
-        try:
-            pulls = client.paginate(f"/repos/{repo}/pulls", {"state": "open"}, max_items=100).items
-        except ForgejoError as e:
-            notes.append(f"{repo}: its open pull requests could not be read ({e.message})")
-            continue
-        for pr in pulls:
+    for repo, prs in pulls.items():
+        for pr in prs:
             n = int(pr.get("number") or 0)
-            asked = {str((u or {}).get("login") or "").lower() for u in pr.get("requested_reviewers") or []}
-            if not n or f"{repo}#{n}" in known or you.lower() not in asked:
+            if not n or f"{repo}#{n}" in known:
+                continue
+            if rr.asked(pr, you):
+                reason = rr.ASKED
+            elif every_pr and rr.needs_request(pr, you, rr.reviews_reader(client, repo, n)):
+                reason = rr.NOT_ASKED
+            else:
                 continue
             sha = (pr.get("head") or {}).get("sha") or ""
             rows.append({"id": f"{repo}#{n}", "tab": "waiting", "repo": repo, "number": n,
                          "title": pr.get("title") or f"PR #{n}", "url": pr.get("html_url") or "",
                          "author": (pr.get("user") or {}).get("login"), "base": (pr.get("base") or {}).get("ref"),
                          "head_ref": (pr.get("head") or {}).get("ref"), "head_sha": sha, "flow": None,
-                         "reason": REVIEW_REASON, "gates": [],
+                         "reason": reason, "gates": [],
                          "checks": _checks(client, repo, sha) if sha else None,
-                         "last_comment": _last_comment(client, repo, n), "waiting_on": None, "can_merge": bool(can_merge),
+                         "last_comment": _last_comment(client, repo, n), "waiting_on": None,
+                         "can_merge": bool(can_merge and reason == rr.ASKED),
                          "updated_at": _epoch(pr.get("updated_at"))})
     return rows, notes
 
@@ -238,7 +226,8 @@ def build_desk(access: Any, store: Any, *, can_merge: bool = False, now: Callabl
     waiting_note = None
     if client is not None and you:
         try:
-            extra, notes = review_rows(client, you, {r["id"] for r in rows}, can_merge=can_merge)
+            extra, notes = review_rows(client, you, {r["id"] for r in rows}, can_merge=can_merge,
+                                       every_pr=access.settings.review_every_pr)
             rows += extra
         except Exception as exc:  # the flow rows still render when the search fails
             notes.append("Pull requests that request your review could not be read: " + getattr(exc, "message", str(exc)))

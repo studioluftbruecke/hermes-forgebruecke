@@ -1,6 +1,6 @@
 name: forgebruecke
-version: "0.0.16"
-description: "Forgebrücke: a bridge between Hermes and your self-hosted Forgejo (or Gitea). Hermes works as its own Forgejo account, and that account's right on each repo (read or write, set in Forgejo) is the only permission layer. Read issues, pull requests, branches, releases and commits, list what waits across repos, and pull any issue or PR into a chat with @forgejo:owner/repo#123. Writes are each approved by you and refused in unattended runs; nothing ever approves or merges main. Every pull request Hermes opens asks you to review it. Receipts re-read every pushed, opened or merged claim from the forge. Flows run agent reviews and checks and stop at you. A desk in Hermes Desktop shows the pull requests that wait for you. Repos: packs, protection presets, a read-only audit, import from GitHub, push mirrors, templates. Mention Hermes' account in a thread and it answers there. Learn mode teaches Git in plain words. forgejo_doctor explains your setup."
+version: "0.0.17"
+description: "Forgebrücke: a bridge between Hermes and your self-hosted Forgejo (or Gitea). Hermes works as its own Forgejo account, and that account's right on each repo (read or write, set in Forgejo) is the only permission layer. Read issues, pull requests, branches, releases and commits, list what waits across repos, and pull any issue or PR into a chat with @forgejo:owner/repo#123. Writes are each approved by you and refused in unattended runs; nothing ever approves or merges main. Every open pull request asks you to review it: Hermes asks on the ones it opens, and its background check asks on every other one that does not yet, however it was opened. Receipts re-read every pushed, opened or merged claim from the forge. Flows run agent reviews and checks and stop at you. A desk in Hermes Desktop shows the pull requests that wait for you. Repos: packs, protection presets, a read-only audit, import from GitHub, push mirrors, templates. Mention Hermes' account in a thread and it answers there. Learn mode teaches Git in plain words. forgejo_doctor explains your setup."
 author: "Studio Luftbrücke"
 license: MIT
 requires_hermes: ">=0.23.0"
@@ -72,6 +72,11 @@ config_schema:
     default: ""
     label: "Profile that runs agent reviews"
     description: "Empty: the profile Forgebrücke runs in. Or any other Hermes profile you already have. A flow's review gate uses it when the flow names none, and the templates fill it in. The desk can also create a separate reviewer profile, only if you click it."
+  review_every_pr:
+    type: boolean
+    default: true
+    label: "Ask me on every pull request"
+    description: "On by default. Every open pull request should ask you to review it. With this on, the background check (every poll interval) asks you on each open pull request that does not ask you yet, in every repo where Hermes' account has write access, however the pull request was opened. It skips the ones you opened and the ones you already reviewed. The desk lists such a pull request even before it asks you, marked review not requested yet. This write runs unattended, without an approval card; dry run applies. Off: only the pull requests Hermes opens with forgejo_create_pr ask you."
   dry_run:
     type: boolean
     default: true

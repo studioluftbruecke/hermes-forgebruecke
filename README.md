@@ -16,6 +16,10 @@ Status: **v0.2, internal build** (not in a catalog yet). This build ships:
   only on repos where that account has write access, each shown to you with its exact text and
   approved by you in Hermes. Refused in cron jobs and single-query runs. Never approves, never merges.
   Every pull request Hermes opens asks you (setting `you`) to review it.
+- Every open pull request asks you to review it (`review_every_pr`, on by default): a background check
+  asks you on each open pull request that does not ask you yet, however it was opened (another tool, a
+  script, the Forgejo web page), in every repo where Hermes' account has write access. It skips the
+  pull requests you opened and the ones you already reviewed, and asks once.
 - The mention channel: mention Hermes' account in an issue or pull request, and Hermes answers there
   (👀 first, one session per thread, at most three answers per thread per hour). On by default in
   every repo where its account may write; only people with write access to the repo start a turn,
@@ -42,7 +46,8 @@ Status: **v0.2, internal build** (not in a catalog yet). This build ships:
   here asks for your approval in Hermes. Protection, presets and the audit's admin checks work only on
   repos where Hermes' account is admin.
 - The desk (Hermes Desktop): a sidebar row "Forgejo · N" with the pull requests waiting for you (the
-  ones that request your review, and the ones whose flow reached you), a page with Waiting for me,
+  ones that request your review, the ones that do not ask you yet, marked so, and the ones whose flow
+  reached you), a page with Waiting for me,
   Running, Blocked and Repos (every repo Hermes' account sees, its right there and a link to change
   it), each row with its gates, checks and last comment and a link into Forgejo, and a settings page.
   With a write token of your account, a row whose flow waits for you or that requests your review also
@@ -105,6 +110,7 @@ thread's repo, so a forge user cannot make Hermes quote another repo.
 | `audit_enabled` | off | Read-only security audit |
 | `learn_mode` | off | Lesson cards after a first pull request, a first failed check, a first merge |
 | `default_review_profile` | empty (the profile Forgebrücke runs in) | The profile that runs a flow's review gate; any profile you have works |
+| `review_every_pr` | on | The background check asks you to review every open pull request that does not ask you yet, where Hermes' account may write; the desk lists such a pull request before that too |
 | `dry_run` | on | Writes are previewed, not sent |
 
 An invalid value falls back to its default, and the doctor names it. Settings of earlier versions
@@ -114,7 +120,7 @@ An invalid value falls back to its default, and the doctor names it. Settings of
 
 | Surface | What it does |
 | --- | --- |
-| **Merge desk** (Desktop) | One list of pull requests waiting for you (review requested, or a flow reached you), each with its gates, checks and the last comment, and a link to review or merge in Forgejo |
+| **Merge desk** (Desktop) | One list of pull requests waiting for you (review requested, not requested yet, or a flow reached you), each with its gates, checks and the last comment, and a link to review or merge in Forgejo |
 | **Sidebar row** | "Forgejo · 3": the pull requests waiting for you |
 | **Flows** | A small YAML file: an agent review, required checks, an optional staging step, then you. Forgejo enforces the hard parts, the plugin orders the steps |
 | **Mention channel** | Mention Hermes' account in an issue or pull request. It reacts 👀, keeps one session per thread and answers people with write access there. It polls notifications, so no inbound port |
@@ -204,6 +210,12 @@ Binding from the first release.
   comment per pull request, notify comments, and, for a `promote` gate, opens and merges a pull
   request into the unprotected branch the flow names. Prompts, verdicts and logs stay in the data
   folder.
+- Review requests (with `review_every_pr`, on by default, and `you` set): every poll interval the gateway
+  reads one issue search for open pull requests and one pulls list per repo that has one, plus the
+  reviews of a pull request that does not ask you yet. Unattended, without an approval card, it asks
+  you to review each such pull request where Hermes' account has write access (one
+  `requested_reviewers` request each, once). It never asks anyone else. With `dry_run` on it sends
+  nothing.
 - The desk (Desktop): the page reads only this plugin's own routes on your Hermes backend (`/desk`,
   `/settings`), never Forgejo; the backend reads with the agent token: one issue search for open pull requests and one pulls list per repo that has one (for the review requests). The Merge button calls
   `/merge`, which merges with the write token of your account, pinned to the commit the desk showed;

@@ -212,6 +212,15 @@ class FakeForgejo:
             if method == "POST" and len(rest) == 3 and rest[0] == "pulls" and rest[2] in ("reviews", "requested_reviewers"):
                 if not self._has(acct, "write:repository"):
                     return self._scope_error("write:repository")
+                if rest[2] == "requested_reviewers":
+                    pr = data.get("pulls", {}).get(int(rest[1])) or {}
+                    names = (payload or {}).get("reviewers") or []
+                    if (pr.get("user") or {}).get("login") in names:
+                        return self._json(422, {"message": "reviewer is the PR author"})
+                    if not r["permissions"]["push"]:
+                        return self._json(403, {"message": "user should have write access"})
+                    have = {u["login"] for u in pr.setdefault("requested_reviewers", [])}
+                    pr["requested_reviewers"] += [{"id": 1, "login": n} for n in names if n not in have]
                 self.writes.append((method, path, payload))
                 return self._json(201 if rest[2] == "requested_reviewers" else 200, {"id": 7000 + len(self.writes)})
             if method == "POST" and len(rest) == 2 and rest[0] == "statuses":

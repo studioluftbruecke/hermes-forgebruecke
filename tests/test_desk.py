@@ -51,10 +51,10 @@ def store_with(tmp_path, *states):
     return store
 
 
-def getters(tokens=("bot",), you=""):
+def getters(tokens=("bot",), you="", **extra):
     env = {"bot": ("FORGEBRUECKE_BOT_ACCOUNT_TOKEN", BOT), "owner": ("FORGEBRUECKE_PERSONAL_WRITE_TOKEN", OWNER)}
     secrets = dict(env[t] for t in tokens)
-    values = {"url": BASE, "dry_run": False, "you": you, "writes": [{"repo_glob": DEMO, "flows": ["demo"]}]}
+    values = {"url": BASE, "dry_run": False, "you": you, "writes": [{"repo_glob": DEMO, "flows": ["demo"]}], **extra}
     return (lambda k, d=None: values.get(k, d)), secrets.get
 
 
@@ -128,13 +128,14 @@ def test_without_you_the_desk_says_so_and_suggests_the_owner_of_the_agents_repos
 
 
 def test_waiting_for_me_lists_prs_that_request_your_review_without_a_flow(tmp_path):
-    """D28: demo #3 requests acme's review and runs no flow; #8 requests someone else; a flow row stays a flow row."""
+    """D28 with review_every_pr off: demo #3 requests acme's review and runs no flow; #8 requests someone else
+    and stays off the desk; a flow row stays a flow row."""
     f = forge()
     other = {**f.data[DEMO]["pulls"][3], "number": 8, "title": "Not for you", "requested_reviewers": [{"login": "bob"}]}
     f.data[DEMO]["pulls"][8] = other
     f.data[DEMO]["issues"][8] = {**f.data[DEMO]["issues"][3], "number": 8}
     store_with(tmp_path, pr_state(4, ("failed", "pending", "pending")))
-    gs, sec = getters(you="acme")
+    gs, sec = getters(you="acme", review_every_pr=False)
     body = desk.api_desk(gs, sec, data_dir=tmp_path, transport=f, now=lambda: 1000)[1]
     waiting = [r for r in body["rows"] if r["tab"] == "waiting"]
     assert [(r["number"], r["flow"], r["reason"], r["gates"]) for r in waiting] == [(3, None, "review requested", [])]
@@ -148,6 +149,32 @@ def test_waiting_for_me_lists_prs_that_request_your_review_without_a_flow(tmp_pa
     pulls = [c for c in f.calls if c[1].endswith(f"/repos/{DEMO}/pulls")]
     assert len(searches) == 1 and searches[0][2]["type"] == "pulls" and searches[0][2]["state"] == "open"
     assert len(pulls) == 1  # one pulls list per repo with open pull requests
+
+
+def add_pr(f, n, *, author="hermes", asked=(), title=None):
+    pr = {**f.data[DEMO]["pulls"][3], "number": n, "title": title or f"PR {n}", "user": {"login": author},
+          "requested_reviewers": [{"login": a} for a in asked], "html_url": f"{BASE}/{DEMO}/pulls/{n}"}
+    f.data[DEMO]["pulls"][n] = pr
+    f.data[DEMO]["issues"][n] = {**f.data[DEMO]["issues"][3], "number": n}
+    return pr
+
+
+def test_every_open_pr_that_does_not_ask_you_yet_still_waits_for_you(tmp_path):
+    """D33 (default on): #8 was opened without a review request (a raw API call, the web page) and still shows,
+    marked so, without the merge button; #9 is yours and #10 you already reviewed, so neither shows."""
+    f = forge()
+    add_pr(f, 8, asked=("bob",))
+    add_pr(f, 9, author="acme")
+    add_pr(f, 10)
+    f.data[DEMO]["reviews"][10] = [{"id": 5, "user": {"login": "acme"}, "state": "REQUEST_CHANGES", "dismissed": False}]
+    gs, sec = getters(tokens=("bot", "owner"), you="acme")
+    body = desk.api_desk(gs, sec, data_dir=tmp_path, transport=f, now=lambda: 1000)[1]
+    rows = {r["number"]: r for r in body["rows"]}
+    assert sorted(rows) == [3, 8]
+    assert rows[3]["reason"] == "review requested" and rows[8]["reason"] == "review not requested yet"
+    assert rows[8]["tab"] == "waiting" and rows[8]["can_merge"] is False
+    assert body["counts"]["waiting"] == 2 and body["label"] == "Forgejo · 2"
+    assert not any(w[0] != "GET" for w in f.writes)  # the desk only reads; the tick asks
 
 
 def test_a_pr_with_a_flow_and_a_review_request_shows_once_as_its_flow_row(tmp_path):
