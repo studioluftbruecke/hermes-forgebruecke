@@ -26,7 +26,7 @@ def read_config(home: Path) -> dict:
     """The profile's config.yaml, read fresh each time (a few KB). Raises when it cannot be read.
 
     No cache on purpose: in the gateway a cache keyed on the file's mtime returned the state from
-    before a `hermes config set` (measured 2026-11-08, M4), so a switch the user flipped was not seen."""
+    before a `hermes config set` (measured), so a switch the user flipped was not seen."""
     path = Path(home) / "config.yaml"
     try:
         import hermes_yaml as yaml  # what Hermes itself reads config.yaml with
@@ -77,25 +77,28 @@ def channel_toolsets(config: dict) -> Optional[list]:
     return list(value) if isinstance(value, (list, tuple)) else None
 
 
-def channel_blockers(config: dict) -> list:
-    """Why the mention channel must not run in this profile, as sentences. Empty means it may."""
+def channel_blockers(config: dict, profile_name: str = "") -> list:
+    """Why the mention channel must not run in this profile, as sentences. Empty means it may.
+    With ``profile_name`` the commands carry ``-p <name>``: a bare ``hermes config set`` in the user's own
+    shell writes the default profile, not the one that runs the plugin."""
     out = []
+    hermes = f"hermes -p {profile_name}" if profile_name else "hermes"
     if not enabled_in(config):
         out.append("the forgebruecke plugin is not enabled in this profile")
     platform = (config.get("platforms") or {}).get(PLATFORM)
     if not (isinstance(platform, dict) and platform.get("enabled", True) is not False):
-        out.append(f"the profile has no platforms.{PLATFORM} block (hermes config set platforms.{PLATFORM} "
+        out.append(f"the profile has no platforms.{PLATFORM} block ({hermes} config set platforms.{PLATFORM} "
                    "'{enabled: true}')")
     if channel_toolsets(config) is None:
         out.append(f"platform_toolsets.{PLATFORM} is not set, so a mention turn would get Hermes' default "
-                   f"tools, shell included; set it to the tools a forge commenter may trigger, for example "
-                   f"hermes config set platform_toolsets.{PLATFORM} '[forgebruecke]'")
+                   f"tools, shell included; set it to the tools a Forgejo commenter may trigger, for example "
+                   f"{hermes} config set platform_toolsets.{PLATFORM} '[forgebruecke]'")
     return out
 
 
 def list_profiles(home: Optional[Path] = None) -> Optional[list]:
     """Names of the Hermes profiles on this host (``default`` plus ``profiles/*``), or None when unknown.
-    The review gate takes any of them (N20)."""
+    The review gate takes any of them."""
     home = home or current_home()
     if home is None:
         return None

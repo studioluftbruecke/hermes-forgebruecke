@@ -1,12 +1,12 @@
 """Access: settings, credentials and token routing by lane for one call, plus the permission checks.
 
-Forgejo is the only permission layer (0.0.14, D27): what Hermes may read or write in a repo is the
+Forgejo is the only permission layer (since 0.0.14): what Hermes may read or write in a repo is the
 collaborator right of its own Forgejo account there (``permissions`` on ``GET /repos/{owner}/{repo}``:
 pull = read, push = write, admin = admin). The plugin asks, caches the answer for ``RIGHTS_TTL_S`` per
 process (a tick or a desk build asks once per repo, not once per call), and a refusal names the right
 it found plus the repo's collaborator page, where the user changes it.
 
-Lanes (M4b; one test asserts every cell of this table):
+Lanes (one test asserts every cell of this table):
 
 | Lane | Who starts it | Reads with | Writes with | Repos |
 | --- | --- | --- | --- | --- |
@@ -30,7 +30,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
+# `.` and `..` as owner or name would walk out of /repos/{owner}/{repo} in the request path.
+_REPO_RE = re.compile(r"^(?!\.{1,2}/)[A-Za-z0-9_.-]{1,100}/(?!\.{1,2}$)[A-Za-z0-9_.-]{1,100}$")
 RIGHTS = ("read", "write", "admin")
 WRITE_RIGHTS = ("write", "admin")
 RIGHTS_TTL_S = 60.0
@@ -104,7 +105,8 @@ def collaboration_url(base_url: str, repo: str) -> str:
 
 
 def repo_right(client, repo: str) -> Optional[str]:
-    """The right of ``client``'s account on ``repo``, or None when it cannot see it (404)."""
+    """The right of ``client``'s account on ``repo``, or None when it cannot see it (404). "Cannot see" is
+    not cached: the refusal tells the user to share the repo, and the next call must see that he did."""
     key = (client.account_key, "repo", repo.lower())
     hit, value = _hit(key)
     if hit:
@@ -113,29 +115,30 @@ def repo_right(client, repo: str) -> Optional[str]:
         info = client.get(f"/repos/{repo}").data or {}
     except _mod("client").ForgejoError as e:
         if e.status == 404:
-            return _put(key, None)
+            return None
         raise
     return _put(key, right_from(info.get("permissions")))
 
 
 def agent_repos(client, *, max_items: int = 500) -> list:
     """Every repo ``client``'s account sees: ``[{repo, right, owner, private, url, open_prs, archived}]``.
-    One paginated ``GET /user/repos``, which also fills the per-repo cache."""
+    One paginated ``GET /user/repos``, which also fills the per-repo cache. The caller gets its own copy."""
     key = (client.account_key, "list", "")
     hit, value = _hit(key)
-    if hit:
-        return value
-    out = []
-    for r in client.paginate("/user/repos", max_items=max_items).items:
-        full = r.get("full_name")
-        if not full:
-            continue
-        right = right_from(r.get("permissions"))
-        _put((client.account_key, "repo", full.lower()), right)
-        out.append({"repo": full, "right": right, "owner": (r.get("owner") or {}).get("login") or full.split("/")[0],
-                    "private": bool(r.get("private")), "url": r.get("html_url") or "",
-                    "open_prs": r.get("open_pr_counter"), "archived": bool(r.get("archived"))})
-    return _put(key, out)
+    if not hit:
+        value = []
+        for r in client.paginate("/user/repos", max_items=max_items).items:
+            full = r.get("full_name")
+            if not full:
+                continue
+            right = right_from(r.get("permissions"))
+            _put((client.account_key, "repo", full.lower()), right)
+            value.append({"repo": full, "right": right,
+                          "owner": (r.get("owner") or {}).get("login") or full.split("/")[0],
+                          "private": bool(r.get("private")), "url": r.get("html_url") or "",
+                          "open_prs": r.get("open_pr_counter"), "archived": bool(r.get("archived"))})
+        _put(key, value)
+    return [dict(r) for r in value]
 
 
 def account_login(client) -> str:
@@ -156,10 +159,12 @@ def owner_counts(repos: list) -> dict:
     return counts
 
 
-def suggest_you(counts: dict, agent: str) -> str:
+def suggest_you(counts: dict, agent: str, *, skip: Any = ()) -> str:
     """The most common owner among the agent account's repos (``{owner: n}``), not the agent itself: most
-    likely the user who shared them. "" when there is none."""
-    mine = {o: n for o, n in (counts or {}).items() if o and o.lower() != (agent or "").lower()}
+    likely the user who shared them. ``skip`` names logins that cannot be him (organisations). "" when
+    there is none."""
+    not_him = {str(s).lower() for s in (agent or "", *skip)}
+    mine = {o: n for o, n in (counts or {}).items() if o and o.lower() not in not_him}
     return max(sorted(mine), key=lambda o: mine[o]) if mine else ""
 
 
@@ -179,7 +184,7 @@ def author_can_write(client, repo: str, login: str) -> "tuple[bool, str]":
     if not _hit(no_perm_key)[1]:
         try:
             perm = str((client.get(f"/repos/{repo}/collaborators/{login}/permission").data or {}).get("permission") or "")
-            return _put(key, (perm in AUTHOR_WRITE, f"Forgejo right: {perm or 'none'}"))
+            return _put(key, (perm in AUTHOR_WRITE, f"Forgejo access: {perm or 'none'}"))
         except ForgejoError as e:
             if e.status == 404:
                 return _put(key, (False, "not a Forgejo user"))
@@ -215,16 +220,15 @@ class Access:
     def read_token_choice(self) -> "tuple[Optional[str], str]":
         if self.lane == "owner":
             return self.creds.owner_token, "owner"
-        return self.creds.token, "bot"  # agent, mention and flow: the agent token only (D29)
+        return self.creds.token, "bot"  # agent, mention and flow: the agent token only
 
     @property
     def read_role(self) -> str:
         return self.read_token_choice()[1]
 
     def _no_token(self) -> Refusal:
-        return Refusal("no_bot_token", "Forgebrücke works as Hermes' own Forgejo account, and its token "
-                                       "(FORGEBRUECKE_BOT_ACCOUNT_TOKEN) is not set. Store it in the plugin settings.",
-                       "token")
+        return Refusal("no_bot_token", "Forgebrücke works as Hermes' account, and Hermes' token is not set. "
+                                       "Add it in Hermes' settings.", "token")
 
     def reader(self):
         token, role = self.read_token_choice()
@@ -255,7 +259,7 @@ class Access:
         """The write token of the user's account: only in the owner lane (his click in the desk), never for
         agent tool writes, mention turns or unattended runs."""
         if self.lane != "owner":
-            raise Refusal("wrong_lane", "Your own account's write token is used only on your click in the desk; "
+            raise Refusal("wrong_lane", "Your write token is used only on your click in the Forgejo desk; "
                                         f"this call is in the {self.lane} lane.")
         if not self.creds.owner_token:
             raise Refusal("dark", _mod("capabilities").dark_sentence("owner_merge"), "owner_token")
@@ -275,10 +279,12 @@ class Access:
         return collaboration_url(self.settings.url, repo)
 
     def check_scope(self, repo: str) -> None:
+        if self.lane == "mention" and not self.scope_repo:
+            raise _no_repo_of_its_own()
         if self.lane in ("mention", "flow") and self.scope_repo and repo.lower() != self.scope_repo.lower():
             where = "answers a mention in" if self.lane == "mention" else "runs a flow on"
             raise Refusal("lane_scope", f"This turn {where} {self.scope_repo}, so it may read only {self.scope_repo}, "
-                                        f"not {repo}. Ask in a chat with Hermes instead; forge users cannot widen "
+                                        f"not {repo}. Ask in a chat with Hermes instead; Forgejo users cannot widen "
                                         "what a mention may read.")
 
     def check_cross_repo(self) -> None:
@@ -288,9 +294,9 @@ class Access:
 
     def _no_access(self, repo: str) -> Refusal:
         link = self.collaboration_url(repo)
-        return Refusal("no_access", f"Hermes' Forgejo account cannot see {repo} (Forgejo right: none), or the repo "
-                                    f"does not exist. To share it, add the account as a collaborator with read or "
-                                    f"write access: {link}", link=link)
+        return Refusal("no_access", f"Hermes' account cannot see {repo}, or the repo does not exist. To share "
+                                    f"it, add the account as a collaborator with read or write access: {link}",
+                       link=link)
 
     def check_read(self, repo: str) -> str:
         """The agent account's right on ``repo``; refuses when it has none."""
@@ -311,9 +317,8 @@ class Access:
         if right not in WRITE_RIGHTS:
             link = self.collaboration_url(repo)
             verb = "comment on" if need == "comment" else "write to"
-            raise Refusal("read_only", f"Hermes may not {verb} {repo}: its Forgejo account has read access there "
-                                       f"(Forgejo right: {right}). Writes need write access; change it in {link}",
-                          link=link)
+            raise Refusal("read_only", f"Hermes may not {verb} {repo}: Hermes' account has {right} access there. "
+                                       f"Writes need write access. Change it in {link}", link=link)
         return self.settings.rule_for(repo)
 
 
@@ -321,6 +326,11 @@ def thread_repo(chat_id: str) -> str:
     """``owner/repo`` from a mention session's chat id (``owner/repo#12``), else ``""``."""
     repo = str(chat_id or "").partition("#")[0].strip()
     return repo if _REPO_RE.match(repo) else ""
+
+
+def _no_repo_of_its_own() -> Refusal:
+    """A review worker, a mention without a thread, or a turn whose origin Hermes did not name."""
+    return Refusal("lane_scope", "This turn has no repo of its own, so it reads nothing from Forgejo.")
 
 
 SettingGetter = Callable[[str, Any], Any]
@@ -333,12 +343,9 @@ def load_access(get_setting: SettingGetter, get_secret: SecretGetter, *, transpo
     settings = settings_mod.load_settings(get_setting)
     creds = settings_mod.load_credentials(get_secret)
     if not settings.url:
-        raise Refusal("not_configured", "The Forgejo address is not set (setting url). Run forgejo_doctor.", "url")
+        raise Refusal("not_configured", "Enter your Forgejo address.", "url")
     if not (creds.token or creds.owner_token):
-        raise Refusal("not_configured", "No token is set: store the token of Hermes' Forgejo account as "
-                                        "FORGEBRUECKE_BOT_ACCOUNT_TOKEN in the plugin settings. Run forgejo_doctor.",
-                      "token")
+        raise Refusal("not_configured", "Add the token of Hermes' account.", "token")
     if lane in ("mention", "flow") and not scope_repo:
-        raise Refusal("lane_scope", f"This {lane} turn has no repo of its own (a review worker, or a mention "
-                                    "without a thread), so it reads nothing from the forge.")
+        raise _no_repo_of_its_own()
     return Access(settings, creds, transport, lane, scope_repo)

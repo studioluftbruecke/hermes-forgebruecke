@@ -1,4 +1,4 @@
-"""M8: packs, protection presets, the audit and the overview of forgejo_repos."""
+"""Packs, protection presets, the audit and the overview of forgejo_repos."""
 import base64
 import json
 
@@ -94,7 +94,7 @@ def test_preset_patches_only_the_changed_fields():
 def test_preset_without_admin_is_refused_before_the_card():
     f = forge()
     verdict, out = approved_run(f, {"action": "preset", "repo": DEMO})
-    assert verdict["action"] == "block" and "need admin rights" in verdict["message"]
+    assert verdict["action"] == "block" and f"Presets need admin on {DEMO}" in verdict["message"]
     assert out["error"] == "needs_admin" and f.writes == []
 
 
@@ -173,17 +173,18 @@ def test_audit_findings_where_the_agent_is_admin_most_severe_first_capped_at_fiv
     assert rules[0] == "unprotected_default" and len(rules) == 5 and audit["more"] == 1
     assert {"deploy_key_write", "public"} <= set(rules)
     assert all(x["link"].startswith(BASE) and x["fix"] for x in audit["findings"])
-    assert audit["read_as"] == "bot" and audit["not_checked"] == []
+    assert audit["not_checked"] == []
     assert not any(c[0] != "GET" for c in f.calls)
 
 
 def test_audit_without_admin_skips_the_admin_checks_and_names_the_right():
-    """Item 7: admin-only checks light per repo where Hermes' account is admin; elsewhere they are not even asked."""
+    """Admin-only checks run per repo where Hermes' account is admin; elsewhere they are not even asked."""
     f = forge()
     out = json.loads(handler(f, audit=True)({"action": "audit", "repo": DEMO}))
     audit = out["audits"][0]
-    assert len(audit["not_checked"]) == 1 and "need admin right of Hermes' Forgejo account" in audit["not_checked"][0]
-    assert "it has write" in audit["not_checked"][0] and f"{BASE}/{DEMO}/settings/collaboration" in audit["not_checked"][0]
+    assert len(audit["not_checked"]) == 1 and f"need admin on {DEMO}" in audit["not_checked"][0]
+    assert "the account has write" in audit["not_checked"][0]
+    assert f"{BASE}/{DEMO}/settings/collaboration" in audit["not_checked"][0]
     assert not any(c[1].endswith(("/branch_protections", "/keys", "/hooks")) for c in f.calls)
 
 
@@ -196,9 +197,9 @@ def test_audit_flags_missing_checks_and_approvals_on_a_protected_branch():
 def test_overview_reports_access_and_protection():
     f = forge(admin_on=(DEMO,), protections=[{"rule_name": "main", "enable_push": False, "enable_status_check": True,
                                               "status_check_contexts": ["devops/tests"], "required_approvals": 1}])
-    out = json.loads(handler(f, tokens=(BOT, READ))({"action": "overview"}))
+    out = json.loads(handler(f, tokens=(BOT, READ))({"action": "overview", "repo": DEMO}))
     ov = out["repos"][0]
-    assert ov["repo"] == DEMO and ov["your_access"] == "admin" and ov["read_as"] == "bot"
+    assert ov["repo"] == DEMO and ov["your_access"] == "admin"
     assert ov["collaboration_url"] == f"{BASE}/{DEMO}/settings/collaboration"
     assert ov["protection"] == {"branch": "main", "protected": True, "direct_push": False,
                                 "required_checks": ["devops/tests"], "approvals": 1, "mergers": "anyone with write"}
@@ -209,6 +210,6 @@ def test_overview_without_a_rule_covers_the_agents_repos_and_keeps_protection_da
     out = json.loads(handler(f, rules=[])({"action": "overview"}))
     by_repo = {r["repo"]: r for r in out["repos"]}
     assert set(by_repo) == {DEMO, OWN}
-    assert by_repo[DEMO]["your_access"] == "write" and "needs admin right" in by_repo[DEMO]["protection"]["unknown"]
+    assert by_repo[DEMO]["your_access"] == "write" and by_repo[DEMO]["protection"] == {"unknown": "needs admin"}
     assert by_repo[OWN]["your_access"] == "admin" and by_repo[OWN]["protection"]["protected"] is False
     assert not any(c[1] == f"/api/v1/repos/{DEMO}/branch_protections" for c in f.calls)

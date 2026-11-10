@@ -1,22 +1,25 @@
-"""M8: ``forgejo_repos``: the repo overview, best-practice packs, protection presets and the audit.
+"""``forgejo_repos``: the repo overview, best-practice packs, protection presets and the audit.
 
-    overview  read: owner, visibility, your access, protection summary, open PRs, last activity
+    overview  read. One repo: owner, visibility, your access, protection summary, open PRs, last activity.
+              Without ``repo``: a short row per repo, with ``shown``, ``total`` and ``has_more``
     pack      write (approval): labels through the API, and files (issue and PR templates, CODEOWNERS,
               a README skeleton when there is none) as one commit on a new branch plus a pull request,
               never a push to the default branch
     preset    write (approval): one named set of the 25 branch-protection fields, shown as a diff first;
-              only where the agent's account is admin of the repo (its Forgejo right, D27)
+              only where the agent's account is admin of the repo
     audit     read, only with ``audit_enabled``: at most five findings per repo, each with a link and one
               suggested fix
-    import    write (approval), M9: ``POST /repos/migrate`` from a public source into the agent's own account
-              (or an org the rule names), with the items asked for; then a report of what came over
-    mirror    write (approval), M9: a push mirror from a repo to another repo on this forge, synced once
-    create_from_template  write (approval), M9: ``POST /repos/{template}/generate`` with
+    import    write (approval): ``POST /repos/migrate`` from a public source into the agent's own account,
+              or the owner the call names, with the items asked for; then a report of what came over
+    mirror    write (approval): a push mirror from a repo to another repo on this forge, synced once
+    create_from_template  write (approval): ``POST /repos/{template}/generate`` with
               ``protected_branch: true``, then a read-back of the new repo's protection
+
+No action checks the new repo's owner; Forgejo refuses a namespace the account may not create in.
 
 Data shapes: ``Preset{name, label, fields{...}}`` (fields are Forgejo's CreateBranchProtectionOption);
 ``Finding{rule, severity, repo, title, detail, link, fix}``; ``PackItem{kind: file|label, path|name, text|color}``.
-Tokens: reads in the caller's lane (M4b); pack and preset writes with the agent token only.
+Tokens: reads in the caller's lane; pack and preset writes with the agent token only.
 """
 from __future__ import annotations
 
@@ -28,6 +31,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 TOOL = "forgejo_repos"
+ACTIONS = ("overview", "audit", "import", "mirror", "create_from_template", "pack", "preset")
 GATED = ("pack", "preset", "import", "mirror", "create_from_template")
 SERVICES = ("git", "github", "gitea", "gitlab", "gogs", "onedev", "gitbucket", "codebase", "forgejo")
 IMPORT_ITEMS = ("issues", "pull_requests", "labels", "milestones", "releases", "wiki", "lfs")
@@ -44,35 +48,33 @@ PACK_BRANCH = "forgebruecke/pack"
 SCHEMA = {
     "name": TOOL,
     "description": (
-        "Repos on the user's Forgejo: action=import (bring a public repo from GitHub or another forge, with its "
-        "issues and pull requests, into the agent's account; approval); action=mirror (push-mirror a repo to another "
-        "repo on this forge and sync once; approval); action=create_from_template (a new repo from a template repo, "
-        "branch protection included; approval); action=overview (one repo, or the repos the rules name, else up to 30 the agent account sees: owner, "
-        "visibility, your access, branch protection, open PRs, last activity); action=pack (best-practice "
-        "files and labels as a pull request, never a push to main; needs the user's approval); action=preset "
-        "(branch protection preset solo-with-agents or team-of-two, shown as a diff, needs the user's approval "
-        "and admin rights of the agent's account on the repo); action=audit (read-only security checks, at "
-        "most five findings per repo, only when the user switched audit on)."),
+        "Repos: overview, audit, import, mirror, create_from_template, pack, preset. overview: access, "
+        "protection and open PRs of one repo, or of up to 30. audit: read-only, once the user switched it on. "
+        "The other five write and ask the user first. import: a public repo with its issues and PRs. mirror: "
+        "push to another repo here. pack: starter files and labels as a PR. preset: branch protection, needs "
+        "admin."),
     "parameters": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["overview", "import", "mirror", "create_from_template",
-                                                  "pack", "preset", "audit"]},
-            "repo": {"type": "string", "description": "owner/name; overview and audit default to the repos the rules name, else the ones the agent account sees"},
+            "action": {"type": "string", "enum": list(ACTIONS)},
+            "repo": {"type": "string", "description": "owner/name (create_from_template: the template repo); "
+                                                      "overview and audit default to the rules' repos"},
             "preset": {"type": "string", "enum": ["solo-with-agents", "team-of-two"],
                        "description": "pack and preset: which working style (default solo-with-agents)"},
-            "branch": {"type": "string", "description": "preset: the branch to protect (default: the repo's default branch)"},
+            "branch": {"type": "string", "description": "preset: branch to protect (default: the default branch)"},
             "checks": {"type": "array", "items": {"type": "string"},
-                       "description": "preset: required check contexts (default: forgebruecke/* when a flow runs there)"},
-            "second": {"type": "string", "description": "pack with team-of-two: the second person's login for CODEOWNERS"},
-            "source": {"type": "string", "description": "import: the clone URL of a public repo (https://github.com/owner/name)"},
-            "service": {"type": "string", "enum": list(SERVICES), "description": "import: the source host type (default from the URL)"},
+                       "description": "preset: required check contexts"},
+            "second": {"type": "string", "description": "pack, team-of-two: second user name for CODEOWNERS"},
+            "source": {"type": "string", "description": "import: https clone URL of a public repo"},
+            "service": {"type": "string", "enum": list(SERVICES),
+                        "description": "import: source host type (default from the URL)"},
             "name": {"type": "string", "description": "import and create_from_template: the new repo's name"},
-            "owner": {"type": "string", "description": "import and create_from_template: the new repo's owner (default: the agent's account)"},
+            "owner": {"type": "string",
+                      "description": "import, create_from_template: new owner (default: Hermes' account)"},
             "items": {"type": "array", "items": {"type": "string", "enum": list(IMPORT_ITEMS)},
-                      "description": "import: what to bring besides the code (default: issues, pull_requests, labels, milestones, releases)"},
+                      "description": "import: what to bring besides code (default: all but wiki, lfs)"},
             "private": {"type": "boolean", "description": "import and create_from_template: private (default true)"},
-            "target": {"type": "string", "description": "mirror: owner/name of the repo on this forge that receives the pushes"},
+            "target": {"type": "string", "description": "mirror: owner/name on this Forgejo that receives the pushes"},
         },
         "required": ["action"],
     },
@@ -238,7 +240,7 @@ def make_spec():
         def execute(access, p) -> dict:
             writer = access.writer()
             if p.extra.get("action") in ("import", "create_from_template"):
-                # a migration copies a whole project and can take minutes (measured: git-consortium > 20 s)
+                # a migration copies a whole project and can take minutes
                 writer = _mod("client").ForgejoClient(access.settings.url, access.creds.token,
                                                       transport=access.transport, timeout=MIGRATE_TIMEOUT_S)
             ForgejoError = _mod("client").ForgejoError
@@ -252,9 +254,9 @@ def make_spec():
                     resp = writer.request(r.method, r.path, json_body=body)
                     done.append((r.method, r.path, resp.data))
             except ForgejoError as e:
-                if e.kind == "timeout" and p.extra.get("action") == "import":
+                if e.may_have_landed and p.extra.get("action") == "import":
                     return _poll_import(access, p, e)
-                return {"ok": False, "sent": bool(done) or e.kind == "timeout", "error": e.kind, "status": e.status,
+                return {"ok": False, "sent": bool(done) or e.may_have_landed, "error": e.kind, "status": e.status,
                         "message": e.message, "done": [f"{m} {path}" for m, path, _ in done]}
             last = done[-1][2] if done else {}
             if p.extra.get("action") in ("import", "create_from_template", "mirror"):
@@ -305,9 +307,8 @@ def make_spec():
             right = _mod("access").right_from(info.get("permissions"))
             link = access.collaboration_url(repo)
             raise _mod("access").Refusal(
-                "needs_admin", f"Protection presets need admin rights on {repo}, and Hermes' Forgejo account has "
-                               f"{right} access there (Forgejo right: {right}). Apply the preset in Forgejo (Settings → "
-                               f"Branches), or give the account admin in {link}", link=link)
+                "needs_admin", f"Presets need admin on {repo}. Hermes' account has {right} there. "
+                               f"Apply it in Forgejo (Settings → Branches) or grant admin: {link}", link=link)
         branch = str(args.get("branch") or base)
         checks = [str(c) for c in (args.get("checks") or [])]
         if not checks:
@@ -329,27 +330,26 @@ def make_spec():
                          + "; ".join(lines), "\n".join(lines),
                          extra={"action": "preset", "branch": branch, "lines": lines})
 
-    def _new_repo_owner(access, args) -> str:
-        """The agent's own account unless the call names another owner; Forgejo decides whether the account
-        may create repos there (D27: its rights are the only permission layer)."""
-        me = (access.writer().get("/user").data or {}).get("login") or ""
-        return str(args.get("owner") or me).strip()
+    def _new_repo_owner(access, args) -> "tuple[str, bool]":
+        """``(owner, own)``: the owner the call names, else the agent's own account, and whether it is that
+        account. Nothing here checks the owner; Forgejo refuses a namespace the account may not create in."""
+        me = _mod("access").account_login(access.writer())
+        owner = str(args.get("owner") or me).strip()
+        return owner, owner.lower() == me.lower()
 
-    def _can_create_user_repo(access) -> bool:
-        """The doctor's side-effect-free probe: POST /user/repos without a name answers 422 when the token may
-        create repos (write:user) and 403 when it may not."""
-        ForgejoError = _mod("client").ForgejoError
+    def _scopes_missing_to_create(access) -> tuple:
+        """The scopes Forgejo names when the token may not create a repo in its own account, else ``()``.
+        An empty POST /user/repos creates nothing: Forgejo checks the scope, then refuses the missing name."""
         try:
             access.writer().post("/user/repos", {})
-        except ForgejoError as e:
-            return e.status != 403
-        return True
+        except _mod("client").ForgejoError as e:
+            return e.scopes if e.kind == "missing_scope" else ()
+        return ()
 
     def _plan_import(access, args):
         source = str(args.get("source") or "").strip()
         if not source.startswith("https://") or any(c in source for c in "@ \n"):
-            raise _refuse("bad_args", "source is the https clone URL of a public repo, without credentials "
-                                      "(a private source needs its own read-only credentials; see K-F7).")
+            raise _refuse("bad_args", "source is the https clone URL of a public repo, without credentials.")
         host = source.split("/")[2].lower()
         service = str(args.get("service") or ("github" if host == "github.com" else "gitlab" if "gitlab" in host
                                                else "git"))
@@ -358,7 +358,7 @@ def make_spec():
         name = str(args.get("name") or source.rstrip("/").split("/")[-1].removesuffix(".git"))
         if not _NAME.match(name):
             raise _refuse("bad_args", f"{name!r} is no valid repo name.")
-        owner = _new_repo_owner(access, args)
+        owner, _own = _new_repo_owner(access, args)
         items = [str(i) for i in (args.get("items") or ("issues", "pull_requests", "labels", "milestones", "releases"))]
         bad = [i for i in items if i not in IMPORT_ITEMS]
         if bad:
@@ -380,21 +380,21 @@ def make_spec():
         info = access.reader().get(f"/repos/{repo}").data or {}
         if not (info.get("permissions") or {}).get("admin"):
             link = access.collaboration_url(repo)
+            right = _mod("access").right_from(info.get("permissions"))
             raise _mod("access").Refusal(
-                "needs_admin", f"Push mirrors need admin rights on {repo}, and Hermes' Forgejo account has "
-                               f"{_mod('access').right_from(info.get('permissions'))} access there. Give it admin in "
-                               f"{link}, or set the mirror up in Forgejo.", link=link)
+                "needs_admin", f"Push mirrors need admin on {repo}. Hermes' account has {right} there. "
+                               f"Set the mirror up in Forgejo or grant admin: {link}", link=link)
         tinfo = access.writer().get(f"/repos/{target}").data or {}
         if not (tinfo.get("permissions") or {}).get("push"):
-            raise _refuse("not_allowed", f"The agent's account cannot push to {target}, so a mirror could not either.")
+            raise _refuse("not_allowed", f"Hermes' account cannot push to {target}, so a mirror could not either.")
         me = (access.writer().get("/user").data or {}).get("login") or ""
         address = tinfo.get("clone_url") or f"{access.settings.url.rstrip('/')}/{target}.git"
-        body = {"remote_address": address, "remote_username": me, "remote_password": "<the agent token>",
+        body = {"remote_address": address, "remote_username": me, "remote_password": "<Hermes' token>",
                 "interval": "8h0m0s", "sync_on_commit": True}
         return WritePlan(TOOL, repo, (Request("POST", f"/repos/{repo}/push_mirrors", body),
                                       Request("POST", f"/repos/{repo}/push_mirrors-sync", {})),
-                         f"a push mirror {repo} → {target} on this forge, with the agent's own token stored in "
-                         "Forgejo as the mirror password, synced once now and on every commit",
+                         f"a push mirror {repo} → {target} on this Forgejo, synced now and on every commit. "
+                         "Forgejo stores Hermes' token as the mirror password",
                          json.dumps(body, indent=1), extra={"action": "mirror", "repo": repo, "target": target})
 
     def _plan_template(access, args):
@@ -405,13 +405,13 @@ def make_spec():
         name = str(args.get("name") or "")
         if not _NAME.match(name):
             raise _refuse("bad_args", "Give the new repo's name (name).")
-        owner = _new_repo_owner(access, args)
+        owner, own = _new_repo_owner(access, args)
         link = f"{access.settings.url.rstrip('/')}/repo/create?template_id={info.get('id')}"
-        if not _can_create_user_repo(access):
-            raise _refuse("dark", "Creating a repo in the agent's own account needs the scope write:user on the agent "
-                                  "token (Forgejo answers 403 without it; measured 2026-11-09). Mint the agent account token "
-                                  f"with write:user, or create it in the web form with the template preselected: {link}",
-                          "token")
+        missing = _scopes_missing_to_create(access) if own else ()
+        if missing:
+            raise _refuse("dark", f"Hermes' token lacks the scope {', '.join(missing)}, so it cannot create a repo "
+                                  "in its own account. Create a token that includes it, or use the web form: "
+                                  f"{link}", "token")
         body = {"owner": owner, "name": name, "private": bool(args.get("private", True)), "git_content": True,
                 "protected_branch": True, "labels": True, "topics": True, "git_hooks": False, "webhooks": False,
                 "avatar": False, "description": f"Created from {template} by Forgebrücke"}
@@ -436,8 +436,8 @@ def make_spec():
                                   "has come over so far: run forgejo_repos action=overview again in a minute.")
                 return out
             _sleep(POLL_WAIT_S)
-        return {"ok": False, "sent": True, "error": "timeout", "message": err.message + f" {repo} has not appeared "
-                "yet; the forge may still be importing. Check it in a few minutes."}
+        return {"ok": False, "sent": True, "error": err.kind, "message": err.message + f" {repo} has not appeared "
+                "yet. Forgejo may still be importing. Check it in a few minutes."}
 
     def _after_create(access, p, last) -> dict:
         """What came over, read back from the forge (never from the request)."""
@@ -476,7 +476,7 @@ def make_spec():
             except ForgejoError as e:
                 came[item] = f"not readable ({e.status})"
         out.update(came_over=came, asked=p.extra["items"],
-                   message=f"Imported {p.extra['source']} as {repo}. What came over is counted on the forge; compare "
+                   message=f"Imported {p.extra['source']} as {repo}. What came over is counted on Forgejo. Compare "
                            "it with the source before you switch.",
                    changeover=["forgejo_repos action=mirror to keep the old host in sync while you switch",
                                f"git remote set-url origin {access.settings.url.rstrip('/')}/{repo}.git (in your working copy)"])
@@ -497,44 +497,73 @@ def _days_since(stamp: Any, now: float) -> Optional[int]:
     return int((now - when.timestamp()) // 86400)
 
 
-def _repos_of(access, args: dict) -> list:
-    if args.get("repo"):
-        return [_mod("access").parse_repo(args.get("repo"))]
-    globs = [r.repo_glob for r in access.settings.writes if "*" not in r.repo_glob and "?" not in r.repo_glob]
-    if globs:
-        return globs
-    repos = [r["repo"] for r in access.repos() if not r.get("archived")][:MAX_REPOS]
-    if not repos:
-        raise _refuse("bad_args", "Name a repo (repo=owner/name); Hermes' Forgejo account sees none.")
-    return repos
+def _listed(access) -> "tuple[list, int]":
+    """The repos an overview or audit without ``repo`` covers, cut at MAX_REPOS, and how many there are: the
+    rules' repos, else the ones the agent account sees."""
+    names = [r.repo_glob for r in access.settings.writes if "*" not in r.repo_glob and "?" not in r.repo_glob]
+    if not names:
+        names = [r["repo"] for r in access.repos() if not r.get("archived")]
+    if not names:
+        raise _refuse("bad_args", "Name a repo (repo=owner/name). Hermes' account sees none.")
+    return names[:MAX_REPOS], len(names)
+
+
+def _each(names: list, one) -> list:
+    """One row per repo. A repo that cannot be read becomes ``{repo, error, message}``; the rest still answer."""
+    Refusal, ForgejoError = _mod("access").Refusal, _mod("client").ForgejoError
+    rows = []
+    for name in names:
+        try:
+            rows.append(one(name))
+        except Refusal as r:
+            rows.append({"repo": name, "error": r.code, "message": r.message})
+        except ForgejoError as e:
+            rows.append({"repo": name, "error": e.kind, "message": e.message})
+    return rows
+
+
+def _protection(access, repo: str, base: str) -> dict:
+    """The protection rule of ``base`` in short. Forgejo shows it to a repo admin only."""
+    try:
+        rules = access.reader().get(f"/repos/{repo}/branch_protections").data or []
+    except _mod("client").ForgejoError as e:
+        return {"branch": base, "unknown": f"could not be read ({e.status})"}
+    rule = next((r for r in rules if (r.get("rule_name") or r.get("branch_name")) == base), None)
+    if rule is None:
+        return {"branch": base, "protected": False}
+    return {"branch": base, "protected": True, "direct_push": bool(rule.get("enable_push")),
+            "required_checks": rule.get("status_check_contexts") or [] if rule.get("enable_status_check") else [],
+            "approvals": rule.get("required_approvals") or 0,
+            "mergers": rule.get("merge_whitelist_usernames") if rule.get("enable_merge_whitelist") else "anyone with write"}
 
 
 def overview(access, repo: str) -> dict:
     right = access.check_read(repo)
-    reader = access.reader()
-    ForgejoError = _mod("client").ForgejoError
-    info = reader.get(f"/repos/{repo}").data or {}
+    info = access.reader().get(f"/repos/{repo}").data or {}
     base = info.get("default_branch") or "main"
-    protection: Any
-    if right != "admin":  # admin-only features light per repo where Hermes' account is admin (0.0.14)
-        protection = {"branch": base, "unknown": f"needs admin right of Hermes' Forgejo account on {repo} (it has "
-                                                 f"{right}); change it in {access.collaboration_url(repo)}"}
+    if right == "admin":
+        protection = _protection(access, repo, base)
     else:
-        try:
-            rules = reader.get(f"/repos/{repo}/branch_protections").data or []
-            rule = next((r for r in rules if (r.get("rule_name") or r.get("branch_name")) == base), None)
-            protection = ({"branch": base, "protected": False} if rule is None else
-                          {"branch": base, "protected": True, "direct_push": bool(rule.get("enable_push")),
-                           "required_checks": rule.get("status_check_contexts") or [] if rule.get("enable_status_check") else [],
-                           "approvals": rule.get("required_approvals") or 0,
-                           "mergers": rule.get("merge_whitelist_usernames") if rule.get("enable_merge_whitelist") else "anyone with write"})
-        except ForgejoError as e:
-            protection = {"branch": base, "unknown": f"could not be read ({e.status})"}
+        protection = {"branch": base, "unknown": f"needs admin (the account has {right})"}
     return {"repo": repo, "owner": (info.get("owner") or {}).get("login"), "private": bool(info.get("private")),
-            "your_access": right, "forgejo_right": right, "collaboration_url": access.collaboration_url(repo),
-            "read_as": access.read_role, "default_branch": base, "protection": protection,
+            "your_access": right, "collaboration_url": access.collaboration_url(repo),
+            "default_branch": base, "protection": protection,
             "open_prs": info.get("open_pr_counter"), "open_issues": info.get("open_issues_count"),
             "last_activity": info.get("updated_at"), "url": info.get("html_url")}
+
+
+SHORT_ROW = ("repo", "owner", "private", "your_access", "protection", "open_prs", "url")
+
+
+def short_overview(access, seen: dict, repo: str) -> dict:
+    """One row of an overview over many repos, from the account's repo list (``seen``, by lowercase name). Only
+    an admin repo, or one the list does not hold, costs its own reads."""
+    entry = seen.get(repo.lower())
+    if entry is None or entry["right"] == "admin":
+        full = overview(access, repo)
+        return {k: full[k] for k in SHORT_ROW}
+    return {"repo": entry["repo"], "owner": entry["owner"], "private": entry["private"], "your_access": entry["right"],
+            "protection": {"unknown": "needs admin"}, "open_prs": entry["open_prs"], "url": entry["url"]}
 
 
 def audit(access, repo: str, *, now: Optional[float] = None) -> dict:
@@ -547,10 +576,10 @@ def audit(access, repo: str, *, now: Optional[float] = None) -> dict:
     url = info.get("html_url") or ""
     base = info.get("default_branch") or "main"
     findings, not_checked = [], []
-    admin = right == "admin"  # the admin-only checks light per repo where Hermes' account is admin (0.0.14)
+    admin = right == "admin"
     if not admin:
-        not_checked.append(f"branch protection, deploy keys and webhooks (they need admin right of Hermes' Forgejo "
-                           f"account on {repo}; it has {right}: {access.collaboration_url(repo)})")
+        not_checked.append(f"branch protection, deploy keys and webhooks need admin on {repo} (the account has "
+                           f"{right}): {access.collaboration_url(repo)}")
 
     def add(rule, severity, title, detail, link, fix):
         findings.append({"rule": rule, "severity": severity, "repo": repo, "title": title, "detail": detail,
@@ -606,20 +635,30 @@ def audit(access, repo: str, *, now: Optional[float] = None) -> dict:
             f"{url}/settings", "If that is not meant, make it private (Settings → Danger zone → Make private).")
     findings.sort(key=lambda f: -f["severity"])
     return {"repo": repo, "findings": findings[:MAX_FINDINGS], "more": max(0, len(findings) - MAX_FINDINGS),
-            "not_checked": not_checked, "read_as": access.read_role}
+            "not_checked": not_checked}
 
 
 def handle(access, args: dict) -> dict:
     action = str(args.get("action") or "")
-    if action == "overview":
-        return {"ok": True, "repos": [overview(access, r) for r in _repos_of(access, args)]}
-    if action == "audit":
-        if not access.settings.audit_enabled:
-            raise _refuse("off", "The security audit is off (setting audit_enabled). It only reads; switch it on in "
-                                 "the plugin settings to use it.", "audit_enabled")
-        return {"ok": True, "audits": [audit(access, r) for r in _repos_of(access, args)],
-                "note": "Read-only. Nothing was changed."}
-    raise _refuse("bad_args", "action is overview, pack, preset or audit.")
+    if action not in ("overview", "audit"):
+        raise _refuse("bad_args", f"action is one of {', '.join(ACTIONS)}.")
+    if action == "audit" and not access.settings.audit_enabled:
+        raise _refuse("off", "The security audit is off. The user switches it on with Security audit on the "
+                             "Forgebrücke page.", "audit_enabled")
+    key, one = ("repos", overview) if action == "overview" else ("audits", audit)
+    if args.get("repo"):
+        out = {"ok": True, key: [one(access, _mod("access").parse_repo(args.get("repo")))]}
+    else:
+        names, total = _listed(access)
+        if action == "overview":
+            seen = {r["repo"].lower(): r for r in access.repos()}
+            rows = _each(names, lambda name: short_overview(access, seen, name))
+        else:
+            rows = _each(names, lambda name: audit(access, name))
+        out = {"ok": True, key: rows, "shown": len(rows), "total": total, "has_more": total > len(rows)}
+        if out["has_more"]:
+            out["message"] = f"{total - len(rows)} more repos are not shown. Pass repo to read one of them."
+    return _mod("tools.write").noted(out) if action == "audit" else out
 
 
 def to_json(result: dict) -> str:

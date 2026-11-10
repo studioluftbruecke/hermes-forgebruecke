@@ -6,7 +6,8 @@
   ``forgebruecke/<flow>/<key>`` and mappable onto Hermes kanban's ``step_key``.
 - ``FlowDef(id, name, repos, gates, on_failure, on_push, version, source)``: one flow. ``repos`` are
   ``owner/repo`` globs. ``on_push`` says what a new head commit resets: ``reset_failed`` (the product
-  rule: the failed gate and everything after it) or ``reset_all``.
+  rule: every gate when none failed, else the failed gate and everything after it) or ``reset_all``.
+  A higher ``version`` runs every gate of every open pull request again.
 - ``GateRun``: the record of one gate on one head commit, stored by ``flows/state.py`` and rendered by
   the desk. ``state`` is one of ``RUN_STATES``; ``waiting`` is the human gate's state (the merge is his).
 
@@ -17,6 +18,7 @@ caller's job (``parse_flow_text``), because the test runner has no YAML library 
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass, field
@@ -103,6 +105,12 @@ class FlowDef:
     def human(self) -> Optional[Gate]:
         return next((g for g in self.gates if g.type == "human"), None)
 
+    def gate_hashes(self) -> list:
+        """One hash per gate's definition, in order. A stored run belongs to the definition it ran under, so
+        the engine runs a gate again when its hash differs from the one in the pull request's state."""
+        return [hashlib.sha256(json.dumps(g.to_dict(), sort_keys=True).encode("utf-8")).hexdigest()[:16]
+                for g in self.gates]
+
     def to_dict(self) -> dict:
         return {"flow": self.id, "name": self.name, "repos": list(self.repos), "gates": [g.to_dict() for g in self.gates],
                 "on_failure": self.on_failure, "on_push": self.on_push, "version": self.version, "source": self.source}
@@ -123,9 +131,9 @@ class GateRun:
     evidence: dict = field(default_factory=dict)
     started_at: Optional[int] = None
     ended_at: Optional[int] = None
-    claim_until: Optional[int] = None
     detail: str = ""
     carried_from: str = ""
+    posted: str = ""  # the status last sent to the forge for this run: "<sha12> <state> <description>"
 
     def to_dict(self) -> dict:
         return asdict(self)

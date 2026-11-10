@@ -1,4 +1,4 @@
-"""M10: learn mode's lesson cards. Three lessons, each shown once per user, at the end of an answer when its
+"""Learn mode's lesson cards. Three lessons, each shown once per user, at the end of an answer when its
 trigger fires and the user switched ``learn_mode`` on.
 
     first_pr            a receipt verified that a pull request was opened
@@ -7,15 +7,24 @@ trigger fires and the user switched ``learn_mode`` on.
 
 Lessons ride on the receipts hook (``transform_llm_output``): Hermes keeps the first non-None rewrite, so a
 second hook of the same plugin could never add to the receipts. Shown lessons live in
-``<data_dir>/lessons.json`` as ``{user_key: [lesson_id, ...]}``.
+``<data_dir>/lessons.json`` as ``{user_key: [lesson_id, ...]}``. Two answers can finish at the same moment, so
+a mark is read, changed and written under a lock (``lessons.lock``).
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
+
+try:
+    import fcntl
+except ImportError:  # a system without POSIX locks writes its marks without one
+    fcntl = None
 
 
 @dataclass(frozen=True)
@@ -76,17 +85,34 @@ class LessonStore:
             return {}
         return data if isinstance(data, dict) else {}
 
-    def mark(self, user: str, lesson_id: str) -> None:
-        if self.path is None:
-            return
-        data = self.shown()
-        data.setdefault(user, [])
-        if lesson_id not in data[user]:
-            data[user].append(lesson_id)
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(self.path)
+        with open(self.path.with_suffix(".lock"), "a+") as lock:  # closing the file releases the lock
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            yield
+
+    def mark(self, user: str, lesson_id: str) -> bool:
+        """Record that ``user`` saw the lesson. False when it was recorded before, so the caller shows no card."""
+        if self.path is None:
+            return True
+        with self._locked():
+            data = self.shown()
+            seen = data.setdefault(user, [])
+            if lesson_id in seen:
+                return False
+            seen.append(lesson_id)
+            fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".lessons-")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False)
+                os.replace(tmp, self.path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp)
+                raise
+        return True
 
 
 def card(lesson: Lesson) -> str:
@@ -97,8 +123,7 @@ def pick(text: str, receipts: list, store: LessonStore, user: str) -> Optional[s
     """At most one card per answer: the first trigger whose lesson this user has not seen. Marks it shown."""
     seen = set(store.shown().get(user, []))
     for lesson_id in triggers(text, receipts):
-        if lesson_id not in seen:
-            store.mark(user, lesson_id)
+        if lesson_id not in seen and store.mark(user, lesson_id):
             return card(BY_ID[lesson_id])
     return None
 

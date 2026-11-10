@@ -1,12 +1,13 @@
-"""The three tick sources share one ``tick()`` (PLAN.md M6, "Tick source"):
+"""The three tick sources share one ``tick()``:
 
 - the gateway: a supervised ``ctx.spawn_task`` loop when ``register()`` runs on an event loop, and the
   mention channel's poll loop (it already runs on the gateway's loop with the profile's token);
 - ``hermes forgebruecke tick``: a cron job or a person;
 - ``forgejo_flows action=run``: one pull request, now.
 
-The store's lock makes an overlap harmless, and ``due()`` skips a loop tick when another source ticked
-within the poll interval, so two loops do not double the forge traffic.
+The store's lock makes an overlap harmless, and ``due()`` skips a loop tick when another source ran a full
+tick within the poll interval, so two loops do not double the forge traffic. A tick on one pull request
+leaves the stamp alone.
 """
 from __future__ import annotations
 
@@ -25,13 +26,15 @@ def _mod(name: str):
 
 
 def due(store, interval_s: float, now: Optional[float] = None) -> bool:
+    """True when no full tick ran within the interval. A stamp from the future (the host clock was wrong
+    when it was written) counts as none."""
     last = (store.engine() or {}).get("at")
     now = time.time() if now is None else now
-    return not isinstance(last, (int, float)) or now - last >= interval_s * 0.8
+    return not isinstance(last, (int, float)) or last > now or now - last >= interval_s * 0.8
 
 
 def has_work(settings) -> bool:
-    """A tick has something to do: a repo runs a flow, or open pull requests should ask you (D33)."""
+    """A tick has something to do: a repo runs a flow, or open pull requests should ask you."""
     return any(r.flows for r in settings.writes) or bool(settings.review_every_pr and settings.you)
 
 
@@ -67,7 +70,7 @@ async def gateway_loop(load_access: Callable[[], Any], get_interval: Callable[[]
                     access = load_access()
                 except Exception as e:
                     store.write_engine({"at": int(time.time()), "source": "gateway-loop", "ok": False,
-                                        "errors": [f"no forge access in this context: {getattr(e, 'message', e)}"]})
+                                        "errors": [f"no Forgejo access in this context: {getattr(e, 'message', e)}"]})
                     access = None
                 if access is not None and has_work(access.settings):
                     await asyncio.to_thread(run_tick, access, data_dir, "gateway-loop")

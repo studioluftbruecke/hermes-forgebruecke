@@ -8,7 +8,7 @@ Writes always use the agent token.
 
 What does not exist here on purpose: no review ``event`` other than ``COMMENT`` (never approve,
 never request changes on someone's behalf), and no merge request of any kind. The only merge the
-plugin will ever send is the flow engine's ``promote`` gate into a non-protected branch (M6).
+plugin will ever send is the flow engine's ``promote`` gate into a non-protected branch.
 """
 from __future__ import annotations
 
@@ -22,8 +22,9 @@ FOOTER = "\n\n---\n<sub>Posted by Hermes through Forgebrücke.</sub>"
 MAX_TEXT = 60_000
 STATES = ("pending", "success", "failure", "error")
 _CONTEXT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
-_SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
-_BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
+_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")  # SHA-1 or SHA-256, never a short form
+# The head goes into a URL path, so no dot-dot, no empty segment, and none of the endings git refuses.
+_BRANCH_RE = re.compile(r"^(?!/)(?!.*(?:\.\.|//))[A-Za-z0-9._/-]{1,200}(?<![/.])$")
 _USER_RE = re.compile(r"^[A-Za-z0-9_.-]{1,40}$")
 WRITE_TOOLS = ("forgejo_comment", "forgejo_create_pr", "forgejo_status")
 PREVIEW_CHARS = 1500
@@ -56,6 +57,7 @@ class WritePlan:
     summary: str     # one line: what this writes where
     preview: str = ""
     extra: dict = field(default_factory=dict, compare=False)
+    quotes_forge: bool = field(default=False, compare=False)  # the summary quotes text a forge user wrote
 
     def signature(self) -> tuple:
         return ((self.tool, self.repo) + tuple(r.signature() for r in self.requests)
@@ -71,10 +73,6 @@ class WritePlan:
             p = self.preview if len(self.preview) <= PREVIEW_CHARS else self.preview[:PREVIEW_CHARS] + "…"
             text += f"\n\n{p}"
         return text
-
-    def to_dict(self) -> dict:
-        return {"tool": self.tool, "repo": self.repo, "summary": self.summary,
-                "requests": [{"method": r.method, "path": r.path, "body": r.body} for r in self.requests]}
 
 
 def _text(args: dict, key: str, what: str, *, required: bool = True) -> str:
@@ -123,7 +121,7 @@ def plan_comment(access, args: dict) -> WritePlan:
     else:
         req = Request("POST", f"/repos/{repo}/issues/{n}/comments", {"body": body})
         summary = f"a comment on {what} #{n} \"{title}\""
-    return WritePlan("forgejo_comment", repo, (req,), summary, _text(args, "body", "comment"))
+    return WritePlan("forgejo_comment", repo, (req,), summary, _text(args, "body", "comment"), quotes_forge=True)
 
 
 def plan_create_pr(access, args: dict) -> WritePlan:
@@ -139,13 +137,19 @@ def plan_create_pr(access, args: dict) -> WritePlan:
     base = str(args.get("base") or default).strip()
     allowed = list(rule.targets) or [default]
     if base not in allowed:
-        raise _refuse("not_allowed", f"Forgebrücke may not open a pull request into {base} of {repo}: "
-                                     + (f"the rule {rule.repo_glob!r} allows {', '.join(allowed)} (targets). Add {base} "
-                                        "to the rule's targets to allow it." if rule.targets else
-                                        f"without a rule naming targets, only the default branch {default} is allowed. "
-                                        f"Add a rule {{repo_glob: {repo}, targets: [{base}]}} to allow it."), "writes")
+        fix = (f"The rule {rule.repo_glob!r} allows {', '.join(allowed)} (targets). Add {base} to its targets."
+               if rule.targets else
+               f"Without a rule that names targets, only the default branch {default} is allowed. "
+               f"Add a rule {{repo_glob: {repo}, targets: [{base}]}}.")
+        raise _refuse("not_allowed", f"Pull requests into {base} of {repo} are not allowed. {fix}", "writes")
     if head == base:
         raise _refuse("bad_args", "The source branch and the target branch are the same.")
+    try:
+        reader.get(f"/repos/{repo}/branches/{head}")
+    except _mod("client").ForgejoError as e:
+        if e.status != 404:
+            raise
+        raise _refuse("no_branch", f"Branch {head} is not on {repo}. Push it first.") from None
     title = _text(args, "title", "title")[:255]
     body = _text(args, "body", "description", required=False) + FOOTER
     payload: dict = {"head": head, "base": base, "title": title, "body": body}
@@ -164,9 +168,9 @@ def plan_create_pr(access, args: dict) -> WritePlan:
         raw = [raw] if isinstance(raw, str) else raw
         reviewers = [str(r).strip().lstrip("@") for r in (raw or []) if str(r).strip()]
         asked_by = "as asked"
-    else:  # D28: Hermes asks you to review every pull request it opens, unless the call names reviewers
+    else:  # Hermes asks you to review every pull request it opens, unless the call names reviewers
         reviewers = [you] if you else []
-        asked_by = "your setting you"
+        asked_by = "you, by default"
     bad = [r for r in reviewers if not _USER_RE.match(r)]
     if bad:
         raise _refuse("bad_args", f"Not user names: {', '.join(bad)}.")
@@ -202,7 +206,7 @@ def plan_status(access, args: dict) -> WritePlan:
             raise _refuse("bad_args", "target_url must be an http(s) address.")
         payload["target_url"] = target_url
     req = Request("POST", f"/repos/{repo}/statuses/{sha}", payload)
-    return WritePlan("forgejo_status", repo, (req,), f"commit status {context} = {state} on {sha[:12]}",
+    return WritePlan("forgejo_status", repo, (req,), f"commit status {context} = {state} on {sha}",
                      description or "(no description)")
 
 
@@ -215,19 +219,41 @@ def plan(access, tool: str, args: dict) -> WritePlan:
     return PLANNERS[tool](access, args if isinstance(args, dict) else {})
 
 
+def noted(result: dict) -> dict:
+    """``result`` with the read tools' note: it quotes text a forge user wrote (a title, a finding, a file)."""
+    return {**result, "note": _mod("tools.read").DATA_NOTE}
+
+
+def _result(p: WritePlan, fields: dict) -> dict:
+    result = {**fields, "summary": p.summary}
+    return noted(result) if p.quotes_forge else result
+
+
+# What each tool creates, and the forgejo_list kind that shows whether it is there.
+_MADE = {"forgejo_comment": ("comment", "comments"), "forgejo_create_pr": ("pull request", "prs"),
+         "forgejo_status": ("status", "statuses")}
+
+
 def execute(access, p: WritePlan) -> dict:
     """Send the approved plan with the agent token. Returns what the forge answered, never the token."""
     writer = access.writer()
     ForgejoError = _mod("client").ForgejoError
     first = p.requests[0]
+    made, list_kind = _MADE[p.tool]
+    if first.path.endswith("/reviews"):  # a line comment is listed with its review
+        list_kind = "reviews"
     try:
         resp = writer.request(first.method, first.path, json_body=first.body)
     except ForgejoError as e:
-        return {"ok": False, "sent": True, "error": e.kind, "status": e.status, "message": e.message,
-                "plan": p.to_dict()}
-    data = resp.data if isinstance(resp.data, dict) else {}
-    out = {"ok": True, "sent": True, "status": resp.status, "tool": p.tool, "repo": p.repo, "summary": p.summary,
-           "id": data.get("id"), "url": data.get("html_url") or data.get("target_url") or None}
+        message = f"{e.message} forgejo_list kind={list_kind} shows it." if e.may_have_landed else e.message
+        return _result(p, {"ok": False, "sent": e.sent, "error": e.kind, "status": e.status, "message": message})
+    if not isinstance(resp.data, dict):  # a create answers with the new object; a list is the collection, read
+        return _result(p, {"ok": False, "sent": True, "error": "bad_answer", "status": resp.status,
+                           "message": f"Forgejo answered {resp.status} without the new {made}. "
+                                      f"Check {p.repo} before you repeat it."})
+    data = resp.data
+    out = _result(p, {"ok": True, "sent": True, "status": resp.status, "tool": p.tool, "repo": p.repo,
+                      "id": data.get("id"), "url": data.get("html_url") or data.get("target_url") or None})
     if p.tool == "forgejo_create_pr":
         out.update(number=data.get("number"), head_sha=(data.get("head") or {}).get("sha"))
         reviewers = p.extra.get("reviewers") or []
@@ -243,5 +269,7 @@ def execute(access, p: WritePlan) -> dict:
 
 
 def preview(p: WritePlan) -> dict:
-    return {"ok": True, "sent": False, "dry_run": True, "would_send": p.to_dict(),
-            "message": "dry_run is on, so nothing was sent. Switch dry_run off in the plugin settings to write."}
+    """What a call answers while dry_run is on. Not ok, so the model cannot read it as a sent write."""
+    return _result(p, {"ok": False, "error": "dry_run", "sent": False,
+                       "message": "Preview only. Nothing was sent. The user switches on Let Hermes write on the "
+                                  "Forgebrücke page."})

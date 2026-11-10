@@ -1,9 +1,6 @@
-"""Every open pull request asks you to review it (0.0.17, D33).
+"""Every open pull request asks you to review it, whoever opened it and however.
 
-Konstantin, 2026-11-09: "all open PRs need to go through me ... this always needs to be the case. This
-also needs to be part of the plugin, or well integrated somehow that this will happen automatically."
-
-``forgejo_create_pr`` already asks ``you`` (D28), but a pull request opened any other way (a raw API call,
+``forgejo_create_pr`` already asks ``you``, but a pull request opened any other way (a raw API call,
 the Forgejo web page, another profile, another tool) asked nobody, and the desk never showed it. Two
 halves close that, both keyed on one rule, ``needs_request``:
 
@@ -16,16 +13,23 @@ halves close that, both keyed on one rule, ``needs_request``:
 
 A pull request is left alone when ``you`` opened it (Forgejo refuses a request to the author with 422),
 when ``you`` is already asked, or when ``you`` already submitted a review on it: after a review the next
-request is the author's call, so the tick never re-asks every 30 seconds. The setting ``review_every_pr``
-(on by default) switches both halves off; ``forgejo_create_pr`` keeps asking either way.
+request is the author's call, so the tick never re-asks every 30 seconds. The sweep also remembers every
+pull request that asked ``you`` (``asked.json``), so it asks once and a request ``you`` removed stays
+removed. The setting ``review_every_pr`` (on by default) switches both halves off; ``forgejo_create_pr``
+keeps asking either way.
 """
 from __future__ import annotations
 
 import importlib
+import json
+import time
+from pathlib import Path
 from typing import Any, Callable
 
 MAX_SEARCH = 200    # open pull requests the search reads
 MAX_REPOS = 30      # pulls lists per scan
+ASKED_FILE = "asked.json"
+KEEP_ASKED = 2000   # entries the memory keeps, newest first
 SUBMITTED = {"APPROVED", "REQUEST_CHANGES", "COMMENT"}
 ASKED, NOT_ASKED = "review requested", "review not requested yet"
 
@@ -80,10 +84,29 @@ def reviews_reader(client: Any, repo: str, number: int) -> Callable[[], list]:
     return lambda: client.paginate(f"/repos/{repo}/pulls/{number}/reviews", {}, max_items=100).items
 
 
-def sweep(access: Any, request: Callable[[str, int, str], None]) -> dict:
+def _read_asked(data_dir: Any) -> dict:
+    try:
+        data = json.loads((Path(data_dir) / ASKED_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_asked(data_dir: Any, asked_at: dict) -> None:
+    newest = sorted(asked_at, key=lambda ref: asked_at[ref], reverse=True)[:KEEP_ASKED]
+    _mod("flows.state").atomic_write(Path(data_dir) / ASKED_FILE,
+                                     json.dumps({ref: asked_at[ref] for ref in newest}))
+
+
+def sweep(access: Any, request: Callable[[str, int, str], None], *, data_dir: Any = None,
+          now: Callable[[], float] = time.time) -> dict:
     """Ask ``settings.you`` on every open pull request that needs it, where the agent account may write.
     ``request(repo, number, you)`` is the write (the engine's ``FlowWriter``, so dry run applies). Returns
-    ``{requested: ["repo#n"], notes: [...], errors: [...]}``."""
+    ``{requested: ["repo#n"], notes: [...], errors: [...]}``.
+
+    With ``data_dir`` a pull request asks a user once: ``asked.json`` there holds ``{"owner/repo#n@user": epoch}``
+    for every pull request that asked that user, whoever sent the request. Removing the request is respected.
+    A changed ``you`` has no entries yet, so the new user is asked everywhere. A dry run leaves the file alone."""
     settings = access.settings
     report: dict = {"requested": [], "notes": [], "errors": []}
     if not settings.review_every_pr or not settings.you:
@@ -91,21 +114,42 @@ def sweep(access: Any, request: Callable[[str, int, str], None]) -> dict:
     ForgejoError, acc = _mod("client").ForgejoError, _mod("access")
     reader = access.reader()
     pulls, report["notes"] = open_pulls(reader)
+    remembered = _read_asked(data_dir) if data_dir else {}
+    asked_now: dict = {}
+
+    def memory_key(repo: str, n: int) -> str:
+        return f"{repo}#{n}@{settings.you.lower()}"
+
     for repo, prs in pulls.items():
-        due = [pr for pr in prs if needs_request(pr, settings.you, reviews_reader(reader, repo, int(pr["number"])))]
+        due = []
+        for pr in prs:
+            n = int(pr.get("number") or 0)
+            if memory_key(repo, n) in remembered:
+                continue
+            if asked(pr, settings.you):
+                asked_now[memory_key(repo, n)] = now()
+                continue
+            try:
+                if needs_request(pr, settings.you, reviews_reader(reader, repo, n)):
+                    due.append(n)
+            except ForgejoError as e:
+                report["errors"].append(f"{repo}#{n}: its reviews could not be read ({e.message})")
         if not due:
             continue
         right = access.right(repo)
         if right not in acc.WRITE_RIGHTS:
-            report["notes"].append(f"{repo}: {len(due)} open pull request(s) do not ask {settings.you} to review, and "
-                                   f"Hermes' account has {right or 'no'} access there, so it cannot ask; the desk "
-                                   f"lists them anyway ({acc.collaboration_url(settings.url, repo)})")
+            report["notes"].append(f"{repo}: {len(due)} open pull request(s) do not ask {settings.you} to review. "
+                                   f"Hermes' account has {right or 'no'} access there, so it cannot ask. Change that "
+                                   f"at {acc.collaboration_url(settings.url, repo)}. The Forgejo desk lists them anyway.")
             continue
-        for pr in due:
-            n = int(pr["number"])
+        for n in due:
             try:
                 request(repo, n, settings.you)
                 report["requested"].append(f"{repo}#{n}")
             except ForgejoError as e:
                 report["errors"].append(f"{repo}#{n}: asking {settings.you} to review failed ({e.message})")
+                continue
+            asked_now[memory_key(repo, n)] = now()
+    if data_dir and asked_now and not settings.dry_run:
+        _write_asked(data_dir, {**remembered, **asked_now})
     return report

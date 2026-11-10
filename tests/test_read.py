@@ -31,11 +31,11 @@ def call(tool, args, **kw):
 
 def test_pr_has_head_checks_with_creator_reviews_and_last_comments():
     out, _ = call("forge_get", {"kind": "pr", "repo": DEMO, "number": 3})
-    assert out["ok"] and out["read_as"] == "bot" and "not instructions" in out["note"]
+    assert out["ok"] and "not instructions" in out["note"]
     pr = out["pr"]
     assert pr["head"] == {"ref": "fix-mul", "sha": HEAD_SHA} and pr["base"] == "main"
     assert pr["checks"]["state"] == "failure"
-    assert {"context": "devops/review", "state": "failure", "description": "mul still wrong", "target_url": None,
+    assert {"context": "devops/review", "state": "failure", "description": "mul still wrong",
             "creator": "hermes"} in pr["checks"]["statuses"]
     assert pr["reviews"]["last_verdict"]["state"] == "REQUEST_CHANGES"  # REQUEST_REVIEW is no verdict
     assert pr["files"] == [{"file": "calc.py", "status": "modified", "additions": 1, "deletions": 1}]
@@ -44,12 +44,43 @@ def test_pr_has_head_checks_with_creator_reviews_and_last_comments():
     assert "diff" not in pr
 
 
-def test_diff_is_cut_at_200_kb_with_a_pointer():
+def block(name, lines):
+    return f"diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n" + f"+{name} line\n" * lines
+
+
+def diff_of(args, diff):
     data = sample_data()
-    data[DEMO]["diff"][3] = "+" * 250_000
-    out, _ = call("forge_get", {"kind": "pr", "repo": DEMO, "number": 3, "diff": True}, data=data)
-    assert len(out["pr"]["diff"]) == 200_000
-    assert out["pr"]["diff_truncated"].endswith("/pulls/3.diff")
+    data[DEMO]["diff"][3] = diff
+    out, _ = call("forge_get", {"kind": "pr", "repo": DEMO, "number": 3, "diff": True, **args}, data=data)
+    return out
+
+
+def test_a_large_diff_is_cut_at_40000_characters_and_names_the_files_that_were_cut():
+    names = [f"src/f{i}.py" for i in range(1, 6)]
+    whole = "".join(block(n, 3500) for n in names)
+    assert len(whole) > 250_000
+    pr = diff_of({}, whole)["pr"]
+    assert 30_000 < len(pr["diff"]) <= 40_000 and whole.startswith(pr["diff"]) and pr["diff"].endswith("\n")
+    assert pr["diff_cut"]["files"] == names and pr["diff_cut"]["note"].endswith("/pulls/3.diff")
+
+
+def test_path_returns_one_files_block():
+    names = ["a.py", "docs/b c.md", "z.py"]
+    whole = "".join(block(n, 3) for n in names)
+    pr = diff_of({"path": "docs/b c.md"}, whole)["pr"]
+    assert pr["diff"] == block("docs/b c.md", 3) and "diff_cut" not in pr
+    big = diff_of({"path": "z.py"}, block("a.py", 5000) + block("z.py", 5000))["pr"]
+    assert big["diff"].startswith("diff --git a/z.py") and len(big["diff"]) <= 40_000
+    assert big["diff_cut"]["files"] == ["z.py"]
+    out = diff_of({"path": "nope.py"}, whole)
+    assert out["error"] == "not_found" and "nope.py" in out["message"]
+
+
+def test_a_small_diff_and_one_without_file_headers_come_back_as_they_are():
+    pr = diff_of({}, "diff --git a/calc.py b/calc.py\n-    return a + b\n+    return a * b\n")["pr"]
+    assert pr["diff"].endswith("+    return a * b\n") and "diff_cut" not in pr
+    pr = diff_of({}, "+" * 250_000)["pr"]
+    assert len(pr["diff"]) == 40_000 and "files" not in pr["diff_cut"] and pr["diff_cut"]["note"]
 
 
 def test_issue_has_the_last_three_of_five_comments():
@@ -57,27 +88,26 @@ def test_issue_has_the_last_three_of_five_comments():
     issue = out["issue"]
     assert issue["comments_total"] == 5 and [c["body"] for c in issue["last_comments"]] == [
         "comment 3", "comment 4", "comment 5"]
-    assert issue["is_pr"] is False
+    assert "is_pr" not in issue and "hint" not in issue
 
 
 def test_a_404_and_a_403_come_back_as_sentences():
     out, _ = call("forge_get", {"kind": "issue", "repo": DEMO, "number": 99})
-    assert out == {"ok": False, "status": 404, "kind": "not_found",
-                   "message": "Not found, or not visible to this token."}
+    assert out["ok"] is False and out["error"] == "not_found" and "#99" in out["message"]
     out, _ = call("forge_get", {"kind": "repo", "repo": "acme/secret"})
-    assert out["error"] == "no_access" and "Forgejo right: none" in out["message"]
+    assert out["error"] == "no_access" and "cannot see acme/secret" in out["message"]
     assert out["link"] == f"{BASE}/acme/secret/settings/collaboration"
     forge, gs, _ = setup()
     no_issue_scope = {BOT: {**bot_account(), "scopes": {"read:repository", "read:user"}}}
     forge.accounts = no_issue_scope
     out = json.loads(plugin.make_read_handler("forge_get", gs, {"FORGEBRUECKE_BOT_ACCOUNT_TOKEN": BOT}.get, transport=forge)(
         {"kind": "issue", "repo": DEMO, "number": 1}))
-    assert out["kind"] == "missing_scope" and "read:issue" in out["message"]
+    assert out["error"] == "missing_scope" and out["status"] == 403 and "read:issue" in out["message"]
 
 
 def test_reads_use_the_agent_token_even_when_the_retired_read_token_is_set():
     out, forge = call("forge_get", {"kind": "repo", "repo": DEMO}, read_token=True)
-    assert out["read_as"] == "bot" and out["repo"]["my_access"] == "write"
+    assert out["repo"]["my_access"] == "write"  # the retired token's account would be admin
 
 
 def test_retired_read_scope_and_read_false_no_longer_block_reads():
@@ -98,8 +128,8 @@ def test_list_prs_in_one_repo_maps_filters_to_forgejo_parameters():
 
 def test_list_across_repos_uses_the_search_and_refuses_repo_only_filters():
     out, forge = call("forge_list", {"kind": "issues", "review_requested": True})
-    assert out["ok"] and forge.calls[-1][1].endswith("/repos/issues/search")
-    assert forge.calls[-1][2]["review_requested"] == "true"
+    search = [c for c in forge.calls if c[1].endswith("/repos/issues/search")]
+    assert out["ok"] and len(search) == 1 and search[0][2]["review_requested"] == "true"
     out, _ = call("forge_list", {"kind": "prs", "author": "acme"})
     assert out["error"] == "bad_args" and "needs a repo" in out["message"]
 
@@ -149,8 +179,8 @@ def test_reference_expands_an_issue_and_says_why_it_cannot():
     text = reference.expand("acme/forgebruecke-demo#1", gs, gsec, transport=forge)
     assert "Issue acme/forgebruecke-demo#1: Probe thread" in text and "comment 5" in text
     assert "not expanded: Not found" in reference.expand("acme/forgebruecke-demo#42", gs, gsec, transport=forge)
-    assert "not the configured forge" in reference.expand("https://elsewhere.test/a/b/issues/1", gs, gsec,
-                                                          transport=forge)
+    assert "is not your Forgejo" in reference.expand("https://elsewhere.test/a/b/issues/1", gs, gsec,
+                                                     transport=forge)
 
 
 def test_reference_completions_list_what_the_agent_account_sees():

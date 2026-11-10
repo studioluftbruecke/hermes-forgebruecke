@@ -15,15 +15,18 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 RULE = {"repo_glob": DEMO, "flows": ["demo"]}
 READ_ONLY = "acme/backup"
 ATTENDED = approval.RunContext()
+PUSHED = ("x", "fix-mul", "fix-mul-2", "fix-mul-3")
 
 
 class Kit:
     def __init__(self, settings=None, *, run=ATTENDED, read_token=True):
         bot = bot_account()
         bot["repos"] = bot["repos"] + [repo(READ_ONLY, "read")]
-        self.forge = FakeForgejo({BOT: bot, READ: owner_account()}, data=sample_data())
+        data = sample_data()
+        data[DEMO]["branches"].update({name: {"name": name, "commit": {"id": "2" * 40}} for name in PUSHED})
+        self.forge = FakeForgejo({BOT: bot, READ: owner_account()}, data=data)
         self.values = {"url": BASE, "dry_run": False, "writes": [RULE], **(settings or {})}
-        # the retired read token's env name is set on purpose: 0.0.14 never reads it
+        # the retired read token's env name is set on purpose: the plugin never reads it
         self.secrets = {"FORGEBRUECKE_BOT_ACCOUNT_TOKEN": BOT, **({"FORGEBRUECKE_PERSONAL_READ_TOKEN": READ} if read_token else {})}
         self.tickets = approval.ApprovalTickets()
         self.run = run
@@ -51,7 +54,7 @@ def test_allowed_comment_asks_first_then_lands_with_the_bot_token():
     directive, result = k.call("forgejo_comment", COMMENT)
     assert directive["action"] == "approve"
     assert directive["rule_key"] == f"forgebruecke:forgejo_comment:{DEMO}"
-    assert directive["message"].startswith(f"This writes to {DEMO} as Hermes' Forgejo account")
+    assert directive["message"].startswith(f"This writes to {DEMO} as Hermes' account:")
     assert ': a comment on PR #3 "Fix calc.mul".\n\nLooks right now.' in directive["message"]
     assert write.FOOTER.strip() not in directive["message"]
     assert result["ok"] and result["sent"] and result["status"] == 201
@@ -65,7 +68,7 @@ def test_a_repo_the_agent_cannot_see_is_refused_by_the_hook_and_nothing_is_writt
     k = Kit()
     directive, result = k.call("forgejo_comment", {**COMMENT, "repo": "studioluftbruecke/brain"})
     assert directive["action"] == "block" and result is None
-    assert "cannot see studioluftbruecke/brain (Forgejo right: none)" in directive["message"]
+    assert "Hermes' account cannot see studioluftbruecke/brain, or" in directive["message"]
     assert f"{BASE}/studioluftbruecke/brain/settings/collaboration" in directive["message"]
     assert "Nothing was sent" in directive["message"]
     assert [c[0] for c in k.forge.calls] == ["GET"] and k.forge.writes == []  # one read: the right
@@ -77,11 +80,11 @@ def test_a_repo_the_agent_cannot_see_is_refused_by_the_hook_and_nothing_is_writt
     ("forgejo_status", {"repo": READ_ONLY, "sha": HEAD_SHA, "state": "success", "description": "x"}),
 ])
 def test_writes_on_a_repo_where_the_agent_has_read_access_are_refused_naming_the_right(tool, args):
-    """D27: Forgejo's collaborator right is the only layer; no rule could allow this, and none is needed for DEMO."""
+    """Forgejo's collaborator right is the only layer; no rule could allow this, and none is needed for DEMO."""
     k = Kit({"writes": [{"repo_glob": "acme/*", "flows": ["demo"]}]})
     directive, result = k.call(tool, args)
     assert directive["action"] == "block" and result is None
-    assert "Forgejo right: read" in directive["message"]
+    assert "Hermes' account has read access there" in directive["message"]
     assert f"{BASE}/{READ_ONLY}/settings/collaboration" in directive["message"]
     assert k.forge.writes == []
 
@@ -129,12 +132,44 @@ def test_unattended_runs_are_refused_by_hook_and_handler(run, reason):
     assert k.forge.calls == []
 
 
-def test_dry_run_previews_without_asking_or_sending():
+@pytest.mark.parametrize("tool,args,summary", [
+    ("forgejo_comment", COMMENT, 'a comment on PR #3 "Fix calc.mul"'),
+    ("forgejo_create_pr", {"repo": DEMO, "head": "fix-mul", "title": "Fix mul", "body": "a * b", "reviewers": []},
+     'a pull request fix-mul → main, "Fix mul"'),
+    ("forgejo_status", {"repo": DEMO, "sha": HEAD_SHA, "state": "success", "description": "checked by hand"},
+     f"commit status forgebruecke/agent = success on {HEAD_SHA}"),
+])
+def test_a_dry_run_preview_is_not_ok_names_the_write_in_one_line_and_sends_nothing(tool, args, summary):
     k = Kit({"dry_run": True})
-    directive, result = k.call("forgejo_comment", COMMENT)
-    assert directive is None and result["dry_run"] and result["sent"] is False
-    assert result["would_send"]["requests"][0]["path"] == f"/repos/{DEMO}/issues/3/comments"
-    assert k.forge.writes == []
+    directive, result = k.call(tool, args)
+    assert directive is None and k.forge.writes == []
+    assert (result["ok"], result["error"], result["sent"]) == (False, "dry_run", False)
+    assert result["summary"] == summary
+    assert result["message"] == ("Preview only. Nothing was sent. The user switches on Let Hermes write on the "
+                                 "Forgebrücke page.")
+    assert not {"would_send", "plan", "requests", "dry_run"} & set(result)
+    sent_text = args.get("body") or args["description"]
+    assert sent_text not in json.dumps(result, ensure_ascii=False)
+
+
+def test_a_write_the_forge_refuses_answers_one_summary_line_without_the_body():
+    k = Kit()
+    args = {**COMMENT, "body": "x" * 5000}
+    k.gate(tool_name="forgejo_comment", args=args, session_id="s1")
+    bot = k.forge.accounts[BOT]
+    bot["scopes"] = (bot["scopes"] - {"write:issue"}) | {"read:issue"}  # the forge refuses after the approval
+    out = approval.run_write("forgejo_comment", args, "s1", k.load, ATTENDED, k.tickets)
+    assert out["ok"] is False and out["error"] == "missing_scope" and out["status"] == 403
+    assert out["summary"] == 'a comment on PR #3 "Fix calc.mul"' and out["note"] == sub("tools.read").DATA_NOTE
+    assert "plan" not in out and len(json.dumps(out)) < 500
+
+
+def test_a_comment_result_quotes_the_thread_title_so_it_carries_the_data_note():
+    note = sub("tools.read").DATA_NOTE
+    assert Kit().call("forgejo_comment", COMMENT)[1]["note"] == note
+    assert Kit({"dry_run": True}).call("forgejo_comment", COMMENT)[1]["note"] == note
+    opened = Kit().call("forgejo_create_pr", {"repo": DEMO, "head": "fix-mul", "title": "Fix mul", "reviewers": []})[1]
+    assert opened["ok"] and "note" not in opened
 
 
 def test_line_comment_is_a_comment_review_never_an_approval():
@@ -161,11 +196,11 @@ def test_create_pr_default_base_labels_reviewers():
 
 
 def test_create_pr_asks_you_to_review_by_default():
-    """D28: every pull request Hermes opens requests the user's review, unless the call names reviewers."""
+    """Every pull request Hermes opens requests the user's review, unless the call names reviewers."""
     k = Kit({"you": "acme"})
     args = {"repo": DEMO, "head": "fix-mul-3", "title": "Fix mul"}
     directive, result = k.call("forgejo_create_pr", args)
-    assert "asking acme to review (your setting you)" in directive["message"]
+    assert "asking acme to review (you, by default)" in directive["message"]
     assert result["review_requested"] == ["acme"]
     assert k.forge.writes[-1][1].endswith("/requested_reviewers") and k.forge.writes[-1][2] == {"reviewers": ["acme"]}
     k = Kit({"you": "acme"})
@@ -192,6 +227,21 @@ def test_create_pr_refuses_a_target_the_rule_does_not_name_and_unknown_labels():
     assert "has no label nope" in directive["message"]
 
 
+def test_create_pr_refuses_a_branch_that_is_not_on_the_repo_before_anyone_is_asked():
+    k = Kit()
+    directive, result = k.call("forgejo_create_pr", {"repo": DEMO, "head": "not-pushed", "title": "t"})
+    assert directive["action"] == "block" and result is None and k.forge.writes == []
+    assert f"Branch not-pushed is not on {DEMO}. Push it first." in directive["message"]
+
+
+@pytest.mark.parametrize("head", ["a/../../issues/1", "/x", "x/", "a//b", "x.", "a b"])
+def test_create_pr_refuses_a_head_that_is_no_branch_name_without_asking_the_forge_for_it(head):
+    k = Kit()
+    directive, _ = k.call("forgejo_create_pr", {"repo": DEMO, "head": head, "title": "t"})
+    assert directive["action"] == "block" and "is not a branch name" in directive["message"]
+    assert not any("/branches/" in c[1] for c in k.forge.calls)
+
+
 def test_status_posts_with_default_context_and_validates():
     k = Kit()
     _, result = k.call("forgejo_status", {"repo": DEMO, "sha": HEAD_SHA, "state": "success",
@@ -201,6 +251,20 @@ def test_status_posts_with_default_context_and_validates():
     assert directive["action"] == "block" and "state must be one of" in directive["message"]
     directive, _ = k.call("forgejo_status", {"repo": DEMO, "sha": "main", "state": "success", "description": "x"})
     assert "full commit sha" in directive["message"]
+
+
+@pytest.mark.parametrize("sha,accepted", [
+    (HEAD_SHA, True), ("a" * 64, True), (HEAD_SHA.upper(), True),
+    (HEAD_SHA[:12], False), (HEAD_SHA[:39], False), (HEAD_SHA + "a", False), ("a" * 63, False),
+])
+def test_status_takes_only_a_full_sha(sha, accepted):
+    k = Kit()
+    directive, result = k.call("forgejo_status", {"repo": DEMO, "sha": sha, "state": "success", "description": "x"})
+    if accepted:
+        assert result["ok"] and k.forge.writes[-1][1].endswith(f"/statuses/{sha.lower()}")
+        assert sha.lower() in result["summary"]
+    else:
+        assert directive["action"] == "block" and "full commit sha" in directive["message"] and k.forge.writes == []
 
 
 def test_non_write_tools_pass_the_hook_untouched():
@@ -263,7 +327,7 @@ def test_run_context_fails_closed_when_the_one_shot_marker_is_gone(monkeypatch):
 
 
 def test_editing_the_plugins_own_code_is_a_guarded_settings_change(tmp_path):
-    """Measured 2026-11-09: a forgebruecke-dev chat patched tools/repos.py to widen the tool's schema."""
+    """Seen in use: an agent chat patched tools/repos.py to widen the tool's schema."""
     approval = sub("approval")
     root = approval.PLUGIN_ROOT
     home = tmp_path / "home"

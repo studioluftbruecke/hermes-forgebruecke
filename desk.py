@@ -1,4 +1,4 @@
-"""M7: the Merge desk's backend. Pure functions over the flow store and the forge; the FastAPI adapter is
+"""The desk's backend. Pure functions over the flow store and the forge; the FastAPI adapter is
 ``dashboard/plugin_api.py``. The Desktop pane reads only these, through ``ctx.rest``, so no token ever
 sits on the client.
 
@@ -6,32 +6,42 @@ Shapes (what the pane renders):
 
     desk     {ok, label, counts{waiting, running, blocked}, rows[Row], repos[RepoCard], engine{...},
               can_merge, you, waiting_note{message, suggestion, settings_href} | null, notes[],
-              forge_error?, generated_at}
+              repos_error (a sentence when the repo list could not be read) | null,
+              forge_error? (a sentence: Hermes' token is missing), generated_at,
+              age_s (how old this read is when the route answers)}
     Row      {id, tab, repo, number, title, url, author, base, head_ref, head_sha, flow (null: no flow),
               reason (null for a flow row; "review requested" for a pull request that requests your review),
               gates[{key, type, segment, state, detail}], checks{state, statuses[...]} | null,
-              last_comment{author, at, body} | null, waiting_on, can_merge, updated_at}
+              last_comment{author, at, body, url, age_s} | null (the last one a person wrote), waiting_on,
+              can_merge, next (one of MOVES: the main button), updated_at, age_s, mergeable (null: unknown),
+              draft (null: unknown),
+              summary{tone: ok | wait | run | bad, text: one sentence}, review_summary | null}
     RepoCard {repo, right (admin | write | read), url, collaboration_url, private, flows[], mentions, admin,
-              open_rows}: every repo the agent account sees (D27: its Forgejo right is the only permission
-              layer; the collaboration page is where the user changes it)
-    settings {ok, forge_url, forge_error, tokens[Token], features[...], token_warnings[], next_step, profiles[],
-              you, you_suggestion, default_review_profile, reviewer{exists, name, command}, settings_href}
+              open_rows, open_prs}: every repo the agent account sees, those with open pull requests or a
+              flow first (its Forgejo right is the only permission layer; the collaboration page is where
+              the user changes it)
+    settings {ok, state (setup | unchecked | preview | ready), next_action{id, text, button, row, login?},
+              setup[{id (url | bot | you | owner), state, value, problem, button}], forge_url, forge_error,
+              tokens[Token], features[...], token_warnings[], next_step, profiles[], you, you_suggestion,
+              you_source (write_token | repo_owner | null), switches{dry_run, review_every_pr, learn_mode,
+              audit_enabled}, default_review_profile, reviewer{exists, name, command}, settings_href}
     Token    one row of ``capabilities.TOKENS`` (role, env, label, name, required, account, mint[], unlocks,
              never, risk?) plus what the probe found: set, login, scopes{} | null, error | null, is_admin, and
-             renamed_from (the pre-0.0.12 name still holding a value while the new one is empty) | null
+             renamed_from (the older name still holding a value while the new one is empty) | null
 
-Waiting for me (D28, D33) = flow rows whose human gate waits for you, plus open pull requests whose
+Waiting for me = flow rows whose human gate waits for you (not for a person the flow names), plus open pull requests whose
 ``requested_reviewers`` contain the ``you`` setting, plus (with ``review_every_pr``, the default) open pull
 requests that should ask you and do not yet, marked "review not requested yet": the flows tick asks you
 there, and the row shows even when that write cannot happen. The scan and the rule live in
 ``review_requests.py``. Without ``you`` the desk says so (``waiting_note``) and lists flow rows only.
 
-Lanes (M4b): the desk reads in the agent lane, with the agent token, so it sees exactly what Hermes' Forgejo
-account sees (D29). The merge button is the owner lane: his write token, on his click, and only when the
+Lanes: the desk reads in the agent lane, with the agent token, so it sees exactly what Hermes' Forgejo
+account sees. The merge button is the owner lane: his write token, on his click, and only when the
 registry says ``owner_merge`` is available and a flow's human gate waits; every other row links to Forgejo.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import re
@@ -43,15 +53,24 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 TABS = ("waiting", "running", "blocked")
+# A row's main button: the user's own move when the row waits for him, a link otherwise.
+MOVES = ("merge", "merge_in_forgejo", "review_in_forgejo", "open_in_forgejo")
 DESK_TTL_S = 15
 SETTINGS_TTL_S = 60
-MAX_COMMENT = 280
+WRITE_TOKEN_TTL_S = 3600
+LATE_TICKS = 3
+LATE_FLOOR_S = 600
+MAX_COMMENT = 140
+MAX_SUMMARY = 140
+COMMENT_PAGE = 10
+SWITCHES = ("dry_run", "review_every_pr", "learn_mode", "audit_enabled")
+SETTABLE = ("you",) + SWITCHES
 REVIEWER = "forgebruecke-reviewer"
 SETTINGS_HREF = "/settings?tab=plugins&agent=forgebruecke"
 REVIEWER_SOUL = """# Forgebrücke reviewer
 
 You review one pull request when Forgebrücke asks you to. Read the prompt and the diff it gives you,
-decide pass or fail, and write the verdict file the prompt names. Nothing else: no forge writes, no
+decide pass or fail, and write the verdict file the prompt names. Nothing else: no Forgejo writes, no
 pushes, no comments, no other files. If you cannot decide, write fail with the reason.
 """
 
@@ -66,7 +85,7 @@ def _mod(name: str):
 
 
 def nav_label(waiting: int) -> str:
-    """The sidebar row's label (N23): the count of pull requests waiting for the user."""
+    """The sidebar row's label: the count of pull requests waiting for the user."""
     if waiting <= 0:
         return "Forgejo"
     return f"Forgejo · {waiting if waiting < 100 else '99+'}"
@@ -76,21 +95,44 @@ def segment(state: str) -> str:
     return _SEGMENT.get(state, "pending")
 
 
-def tab_of(st: dict) -> Optional[str]:
-    """Which desk tab a PR's flow state belongs to; None for a closed or merged PR."""
+def tab_of(st: dict, *, you: Optional[str] = None) -> Optional[str]:
+    """Which desk tab a PR's flow state belongs to; None for a closed or merged PR. With ``you`` (the
+    setting, also when empty) a merge the flow gives to another person is not waiting for the user."""
     if st.get("closed") or st.get("merged"):
         return None
     states = [g.get("state") for g in st.get("gates") or []]
     if any(segment(s) == "failed" for s in states):
         return "blocked"
     if "waiting" in states:
-        return "waiting"
+        who = _waiting_on(_human(st))
+        return "running" if you is not None and who and who.lower() != you.lower() else "waiting"
     return "running"
+
+
+def _move(mine: bool, flow: Any, can_merge: bool) -> str:
+    """A row's main button (one of ``MOVES``). ``mine``: the row sits under Waiting for me."""
+    if not mine:
+        return "open_in_forgejo"
+    if not flow:
+        return "review_in_forgejo"
+    return "merge" if can_merge else "merge_in_forgejo"
+
+
+def _human(st: dict) -> Optional[dict]:
+    return next((g for g in st.get("gates") or [] if g.get("type") == "human"), None)
 
 
 def _cap(text: Any, n: int) -> str:
     s = re.sub(r"\s+", " ", str(text or "")).strip()
     return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _ago(seconds: int) -> str:
+    """An age in the words the pages use."""
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "min")):
+        if seconds >= size:
+            return f"{round(seconds / size)} {unit} ago"
+    return f"{seconds} s ago"
 
 
 def _checks(client, repo: str, sha: str) -> Optional[dict]:
@@ -101,23 +143,37 @@ def _checks(client, repo: str, sha: str) -> Optional[dict]:
     return _mod("tools.read").compact_status(combined)
 
 
-def _last_comment(client, repo: str, number: int) -> Optional[dict]:
+def _last_comment(client, repo: str, number: int, *, now: Callable[[], float] = time.time) -> Optional[dict]:
+    """The newest comment a person wrote. Forgebrücke's own comments (status and tool comments, marked by
+    their footer) are skipped: the row already shows what they say."""
+    path = f"/repos/{repo}/issues/{number}/comments"
     try:
-        first = client.get(f"/repos/{repo}/issues/{number}/comments", {"limit": 1, "page": 1})
+        first = client.get(path, {"limit": COMMENT_PAGE, "page": 1})
         total = int((first.headers or {}).get("x-total-count") or 0) if hasattr(first, "headers") else 0
-        items = first.data or []
-        if total > 1:
-            items = client.get(f"/repos/{repo}/issues/{number}/comments", {"limit": 1, "page": total}).data or []
+        last_page = max(1, -(-total // COMMENT_PAGE))
+        found = None
+        for page in (last_page, last_page - 1):
+            if page < 1:
+                break
+            items = (first if page == 1 else client.get(path, {"limit": COMMENT_PAGE, "page": page})).data or []
+            found = next((c for c in reversed(items) if not _own(c)), None)
+            if found is not None:
+                break
     except Exception:
         return None
-    if not items:
+    if found is None:
         return None
-    c = items[-1]
-    return {"author": (c.get("user") or {}).get("login"), "at": c.get("created_at"),
-            "body": _cap(plain_text(c.get("body")), MAX_COMMENT), "url": c.get("html_url")}
+    at = _epoch(found.get("created_at"))
+    return {"author": (found.get("user") or {}).get("login"), "at": found.get("created_at"),
+            "body": _cap(plain_text(found.get("body")), MAX_COMMENT), "url": found.get("html_url"),
+            "age_s": max(0, int(now() - at)) if at is not None else None}
 
 
 _FOOTERS = ("Kept up to date by Forgebrücke", "Posted by Hermes through Forgebrücke")
+
+
+def _own(comment: dict) -> bool:
+    return any(footer in str(comment.get("body") or "") for footer in _FOOTERS)
 
 
 def plain_text(body: Any) -> str:
@@ -140,27 +196,96 @@ def _waiting_on(human: Optional[dict]) -> Optional[str]:
     return m.group(1) if m and m.group(1) != "you" else None
 
 
-def row(st: dict, client: Any, *, can_merge: bool) -> Optional[dict]:
-    tab = tab_of(st)
+def _sentence(text: Any) -> str:
+    s = re.sub(r"\s+", " ", str(text or "")).strip()
+    found = re.match(r"(.+?[.!?])(?:\s|$)", s)
+    return found.group(1) if found else s
+
+
+def _failed_checks(r: dict) -> list:
+    return [s for s in (r.get("checks") or {}).get("statuses") or [] if s.get("state") in ("failure", "error")]
+
+
+def summarise(r: dict, you: str = "") -> dict:
+    """Where a row stands, as one sentence and a tone. What stops a merge comes first: a failed gate, a
+    conflict, a failed check. Then what runs, then what waits. Whose move a waiting row is was decided
+    by its tab (``tab_of``); ``you`` is no longer read."""
+    gates = r.get("gates") or []
+
+    def name(g: dict) -> str:
+        return "Merge" if g.get("type") == "human" else str(g.get("key") or g.get("type") or "gate").capitalize()
+
+    def say(tone: str, text: str) -> dict:
+        return {"tone": tone, "text": _cap(text, MAX_SUMMARY)}
+
+    failed = next((g for g in gates if g.get("segment") == "failed"), None)
+    if failed:
+        detail = re.sub(r"^\S+ by \S+:\s*", "", str(failed.get("detail") or ""))
+        detail = _sentence(detail)
+        end = "" if detail.endswith((".", "!", "?")) else "."
+        return say("bad", f"{name(failed)} failed: {detail}{end}" if detail else f"{name(failed)} failed.")
+    rr = _mod("review_requests")
+    if r.get("draft"):
+        return say("wait", "Draft. Waiting for your review." if r.get("reason") == rr.ASKED else "Draft.")
+    if r.get("mergeable") is False:  # a conflict, or Forgejo has not finished checking: it does not say which
+        return say("bad", "Waiting for your review. Cannot be merged yet." if r.get("reason") == rr.ASKED
+                   else "Cannot be merged yet.")
+    red = _failed_checks(r)
+    if red:
+        return say("bad", f"Check {red[0].get('context')} failed." if len(red) == 1 else f"{len(red)} checks failed.")
+    running = next((g for g in gates if g.get("segment") == "running"), None)
+    if running:
+        return say("run", f"{name(running)} is running.")
+    if r.get("flow") and any(g.get("segment") == "waiting" for g in gates):
+        if r.get("tab") == "waiting":
+            return say("ok", "Ready. Every gate passed, your merge is next.")
+        return say("wait", f"Every gate passed. Waiting for {r.get('waiting_on') or 'someone else'} to merge.")
+    pending = next((g for g in gates if g.get("segment") == "pending"), None)
+    if pending:
+        return say("run", f"{name(pending)} is next.")
+    if r.get("reason") == rr.ASKED:
+        return say("wait", "Waiting for your review.")
+    if r.get("reason") == rr.NOT_ASKED:
+        return say("wait", "Open, and nobody asked you to review it yet.")
+    if gates:
+        return say("ok", "Every gate passed.")
+    return say("wait", "Open.")
+
+
+def _review_summary(r: dict) -> Optional[str]:
+    done = next((g for g in r.get("gates") or [] if g.get("type") == "review" and g.get("segment") == "done"), None)
+    text = _sentence((done or {}).get("detail"))
+    return _cap(text[:1].upper() + text[1:], 200) if text else None
+
+
+def row(st: dict, client: Any, *, can_merge: bool, now: Callable[[], float] = time.time,
+        you: Optional[str] = None) -> Optional[dict]:
+    tab = tab_of(st, you=you)
     if tab is None:
         return None
+    mine = tab == "waiting"
     repo, n, sha = st["repo"], int(st["pr"]), st.get("head_sha") or ""
     gates = [{"key": g.get("gate_key"), "type": g.get("type"), "state": g.get("state"),
               "segment": segment(g.get("state")), "detail": _cap(g.get("detail"), 200)}
              for g in st.get("gates") or []]
-    human = next((g for g in st.get("gates") or [] if g.get("type") == "human"), None)
+    human = _human(st)
     return {"id": f"{repo}#{n}", "tab": tab, "repo": repo, "number": n, "title": st.get("title") or f"PR #{n}",
             "url": st.get("url") or "", "author": st.get("author"), "base": st.get("base"),
             "head_ref": st.get("head_ref"), "head_sha": sha, "flow": st.get("flow"), "reason": None, "gates": gates,
             "checks": _checks(client, repo, sha) if client is not None and sha else None,
-            "last_comment": _last_comment(client, repo, n) if client is not None else None,
-            "waiting_on": _waiting_on(human) if tab == "waiting" else None,
-            "can_merge": bool(can_merge and tab == "waiting"), "updated_at": st.get("updated_at")}
+            "last_comment": _last_comment(client, repo, n, now=now) if client is not None else None,
+            "waiting_on": _waiting_on(human) if (human or {}).get("state") == "waiting" else None,
+            "can_merge": bool(can_merge and mine), "updated_at": st.get("updated_at"), "mergeable": None,
+            "draft": None,
+            "next": _move(mine, st.get("flow") or True, bool(can_merge))}
 
 
-def repo_cards(access: Any, rows: list) -> list:
-    """Every repo the agent account sees, with its Forgejo right and the switches the rules set there."""
+def repo_cards(access: Any, rows: list, *, pulls: Optional[dict] = None) -> list:
+    """Every repo the agent account sees, with its Forgejo right and the switches the rules set there.
+    Repos with open pull requests or a flow come first. ``pulls`` is the desk's own scan ({repo: [pull]});
+    a repo outside it takes Forgejo's counter from the repo list."""
     settings, acc = access.settings, _mod("access")
+    scanned = {k.lower(): len(v) for k, v in (pulls or {}).items()}
     out = []
     for r in access.repos():
         repo, right = r["repo"], r["right"]
@@ -169,7 +294,9 @@ def repo_cards(access: Any, rows: list) -> list:
                     "collaboration_url": acc.collaboration_url(settings.url, repo), "private": r.get("private"),
                     "flows": list(rule.flows), "mentions": bool(rule.mentions and right in acc.WRITE_RIGHTS),
                     "admin": right == "admin",
-                    "open_rows": sum(1 for x in rows if x.get("flow") and x["repo"].lower() == repo.lower())})
+                    "open_rows": sum(1 for x in rows if x.get("flow") and x["repo"].lower() == repo.lower()),
+                    "open_prs": scanned.get(repo.lower(), int(r.get("open_prs") or 0))})
+    out.sort(key=lambda c: (not (c["open_prs"] or c["flows"]), c["repo"].lower()))
     return out
 
 
@@ -181,19 +308,19 @@ def _epoch(iso: Any) -> Optional[int]:
         return None
 
 
-def review_rows(client: Any, you: str, known: set, can_merge: bool = False,
-                every_pr: bool = False) -> "tuple[list, list]":
+def review_rows(client: Any, you: str, known: set, can_merge: bool = False, every_pr: bool = False, *,
+                pulls: Optional[dict] = None, now: Callable[[], float] = time.time) -> "tuple[list, list]":
     """Open pull requests that ask ``you`` to review them, and with ``every_pr`` those that should and do not
-    yet (D33), as Waiting rows without a flow, plus notes for what was cut or unreadable. ``known`` holds the
-    ids of flow rows (a flow row wins). ``can_merge``: his write token can merge, so the row offers the Merge
-    button (0.0.15)."""
+    yet, as Waiting rows without a flow, plus notes for what was cut or unreadable. ``known`` holds the
+    ids of flow rows in lower case (a flow row wins; Forgejo's names ignore case). ``can_merge``: his write token can merge, so the row offers the Merge
+    button. ``pulls`` is an ``open_pulls`` scan the caller already ran; without it the scan runs here."""
     rr = _mod("review_requests")
-    pulls, notes = rr.open_pulls(client)
+    pulls, notes = (pulls, []) if pulls is not None else rr.open_pulls(client)
     rows = []
     for repo, prs in pulls.items():
         for pr in prs:
             n = int(pr.get("number") or 0)
-            if not n or f"{repo}#{n}" in known:
+            if not n or f"{repo}#{n}".lower() in known:
                 continue
             if rr.asked(pr, you):
                 reason = rr.ASKED
@@ -208,54 +335,121 @@ def review_rows(client: Any, you: str, known: set, can_merge: bool = False,
                          "head_ref": (pr.get("head") or {}).get("ref"), "head_sha": sha, "flow": None,
                          "reason": reason, "gates": [],
                          "checks": _checks(client, repo, sha) if sha else None,
-                         "last_comment": _last_comment(client, repo, n), "waiting_on": None,
-                         "can_merge": bool(can_merge and reason == rr.ASKED),
-                         "updated_at": _epoch(pr.get("updated_at"))})
+                         "last_comment": _last_comment(client, repo, n, now=now), "waiting_on": None,
+                         "can_merge": bool(can_merge and reason == rr.ASKED), "next": _move(True, None, False),
+                         "updated_at": _epoch(pr.get("updated_at")), "mergeable": _mergeable(pr),
+                         "draft": _draft(pr)})
     return rows, notes
 
 
-def build_desk(access: Any, store: Any, *, can_merge: bool = False, now: Callable[[], float] = time.time) -> dict:
+def _mergeable(pr: Optional[dict]) -> Optional[bool]:
+    value = (pr or {}).get("mergeable")
+    return value if isinstance(value, bool) else None
+
+
+def _draft(pr: Optional[dict]) -> Optional[bool]:
+    value = (pr or {}).get("draft")
+    return value if isinstance(value, bool) else None
+
+
+def _account_kind(client: Any, login: str) -> Optional[str]:
+    """``user``, ``org``, or None when Forgejo did not say. Forgejo answers ``/users/{login}`` for an
+    organisation too, so the organisation route decides."""
+    try:
+        client.get(f"/orgs/{login}")
+        return "org"
+    except Exception as exc:
+        return "user" if getattr(exc, "status", None) == 404 else None
+
+
+def suggest_login(client: Any, counts: dict, agent: str) -> str:
+    """Who the user probably is: the most common owner of the agent account's repos that is a person. An
+    organisation, or an owner whose kind Forgejo did not tell, is never suggested."""
+    acc = _mod("access")
+    skip: list = []
+    for _ in range(4):
+        try:
+            name = acc.suggest_you(counts, agent, skip=tuple(skip))
+        except TypeError:  # suggest_you without skip
+            name = acc.suggest_you({o: n for o, n in (counts or {}).items() if o not in skip}, agent)
+        if not name:
+            return ""
+        if _account_kind(client, name) == "user":
+            return name
+        skip.append(name)
+    return ""
+
+
+def build_desk(access: Any, store: Any, *, can_merge: bool = False, now: Callable[[], float] = time.time,
+               you_hint: Optional[dict] = None) -> dict:
+    """``you_hint`` ({login, source}) is who the settings route already found the user to be; without it the
+    desk asks the forge itself when ``you`` is empty."""
     forge_error = None
     try:
         client = access.reader()
-    except Exception as exc:  # stored state still renders when the forge or a token is missing
-        client, forge_error = None, getattr(exc, "message", str(exc))
-    rows = [r for r in (row(st, client, can_merge=can_merge) for st in store.all_prs()) if r is not None]
+    except Exception:  # no token for Hermes' account: the stored rows still render
+        client = None
+        forge_error = NEXT_TEXT["set_token"] + " Checks, comments and review requests are missing."
     you = access.settings.you
+    rows = [r for r in (row(st, client, can_merge=can_merge, now=now, you=you) for st in store.all_prs())
+            if r is not None]
     notes: list = []
+    missing: list = []  # what a failing Forgejo left out: one note for one outage
+    failure: Optional[Exception] = None
     waiting_note = None
+    pulls: dict = {}
     if client is not None and you:
         try:
-            extra, notes = review_rows(client, you, {r["id"] for r in rows}, can_merge=can_merge,
-                                       every_pr=access.settings.review_every_pr)
+            pulls, notes = _mod("review_requests").open_pulls(client)
+            extra, _ = review_rows(client, you, {r["id"].lower() for r in rows}, can_merge=can_merge,
+                                   every_pr=access.settings.review_every_pr, pulls=pulls, now=now)
+            by_id = {f"{repo}#{pr.get('number')}".lower(): pr for repo, prs in pulls.items() for pr in prs}
+            for r in rows:
+                pr = by_id.get(r["id"].lower())
+                r["mergeable"], r["draft"] = _mergeable(pr), _draft(pr)
             rows += extra
         except Exception as exc:  # the flow rows still render when the search fails
-            notes.append("Pull requests that request your review could not be read: " + getattr(exc, "message", str(exc)))
+            missing.append("review requests")
+            failure = exc
     elif not you:
-        suggestion = ""
-        if client is not None:
+        hint = dict(you_hint or {})
+        if not hint and client is not None:
             try:
                 acc = _mod("access")
-                suggestion = acc.suggest_you(acc.owner_counts(access.repos()), acc.account_login(client))
+                hint = {"login": suggest_login(client, acc.owner_counts(access.repos()), acc.account_login(client)),
+                        "source": "repo_owner"}
             except Exception:
-                suggestion = ""
-        waiting_note = {"message": "Set your Forgejo login (setting you) to see the pull requests that request your "
-                                   "review here. Until then, Waiting for me lists only pull requests whose flow "
-                                   "reached you.", "suggestion": suggestion or None, "settings_href": SETTINGS_HREF}
-    try:
-        repos = repo_cards(access, rows) if client is not None else []
-    except Exception as exc:
-        repos = []
-        notes.append("The repos Hermes' Forgejo account sees could not be read: " + getattr(exc, "message", str(exc)))
+                hint = {}
+        login = hint.get("login") or None
+        waiting_note = {"message": "Which Forgejo user are you?", "suggestion": login,
+                        "source": hint.get("source") if login else None, "settings_href": SETTINGS_HREF}
+    repos, repos_error = [], None if client is not None else REPOS_UNREAD
+    if client is not None:
+        try:
+            repos = repo_cards(access, rows, pulls=pulls)
+        except Exception as exc:
+            missing.append("repos")
+            failure, repos_error = failure or exc, REPOS_UNREAD
+    if missing:
+        notes.append(f"{_observed(failure)} {' and '.join(missing).capitalize()} are missing.")
+    for r in rows:
+        r["age_s"] = max(0, int(now() - r["updated_at"])) if r.get("updated_at") else None
+        if r["can_merge"] and (r.get("draft") or r.get("mergeable") is False):  # Forgejo would refuse the merge
+            r["can_merge"], r["next"] = False, _move(r["tab"] == "waiting", r.get("flow"), False)
+        r["summary"] = summarise(r, you)
+        r["review_summary"] = _review_summary(r)
     order = {t: i for i, t in enumerate(TABS)}
     rows.sort(key=lambda r: (order[r["tab"]], -(r.get("updated_at") or 0)))
     counts = {t: sum(1 for r in rows if r["tab"] == t) for t in TABS}
     engine = store.engine() or {}
+    tick_age = int(now() - engine["at"]) if engine.get("at") else None
+    late_after = max(LATE_FLOOR_S, LATE_TICKS * access.settings.poll_interval)
+    if tick_age is not None and tick_age > late_after and _mod("flows.loop").has_work(access.settings):
+        notes.append(f"Flows last ran {_ago(tick_age)}. Rows of a flow may be out of date.")
     out = {"ok": True, "label": nav_label(counts["waiting"]), "counts": counts, "rows": rows,
-           "repos": repos, "can_merge": bool(can_merge), "you": you or None, "waiting_note": waiting_note,
-           "notes": notes,
-           "engine": {"at": engine.get("at"), "source": engine.get("source"),
-                      "age_s": int(now() - engine["at"]) if engine.get("at") else None,
+           "repos": repos, "repos_error": repos_error, "can_merge": bool(can_merge), "you": you or None,
+           "waiting_note": waiting_note, "notes": notes,
+           "engine": {"at": engine.get("at"), "source": engine.get("source"), "age_s": tick_age,
                       "errors": (engine.get("errors") or [])[:3]},
            "forge_url": access.settings.url, "generated_at": int(now())}
     if forge_error:
@@ -263,9 +457,32 @@ def build_desk(access: Any, store: Any, *, can_merge: bool = False, now: Callabl
     return out
 
 
+REPOS_UNREAD = "The repo list could not be read."
+
+
+def _observed(exc: Optional[Exception]) -> str:
+    """What a failed read showed, without a guessed cause."""
+    status = getattr(exc, "status", None)
+    if isinstance(status, int):
+        return f"Forgejo answered {status}."
+    return "Forgejo did not answer." if hasattr(exc, "kind") else f"A read failed ({type(exc).__name__})."
+
+
+# A refusal for a setting that is still empty is a setup step, said in the settings page's own words.
+_SETUP_STEP = {("not_configured", "url"): "set_url", ("not_configured", "token"): "set_token",
+               ("no_bot_token", "token"): "set_token"}
+
+
 def _refusal_body(exc: Any) -> dict:
-    return {"ok": False, "error": getattr(exc, "code", "error"), "message": getattr(exc, "message", str(exc)),
-            "setting": getattr(exc, "setting", ""), "settings_href": SETTINGS_HREF}
+    """A route's answer when it could not do its work. ``action`` says which button helps: ``settings``
+    for a missing setting (with ``title``), ``retry`` for everything else."""
+    code, setting = getattr(exc, "code", "error"), getattr(exc, "setting", "")
+    out = {"ok": False, "error": code, "message": getattr(exc, "message", str(exc)), "action": "retry",
+           "setting": setting, "settings_href": SETTINGS_HREF}
+    step = _SETUP_STEP.get((code, setting))
+    if step:
+        out.update(title="Set up Forgebrücke first", message=NEXT_TEXT[step], action="settings")
+    return out
 
 
 def _cached(key: tuple, ttl: float, refresh: bool, make: Callable[[], dict], now: Callable[[], float]) -> dict:
@@ -307,13 +524,19 @@ def api_settings(get_setting, get_secret, *, transport: Any = None, refresh: boo
                            "is_admin": probe.get("is_admin", False)})
         default = settings_mod.load_settings(get_setting, lambda: profile.current_name(home))
         instance = rep.get("instance") or {}
-        you = rep.get("you") or {}
-        return {"ok": True, "forge_url": instance.get("url"), "forge_error": (instance.get("error") or {}).get("message"),
+        login, source = _who(rep, probed, default, get_secret, transport)
+        verdicts = token_verdicts(rep, {t["role"]: t["set"] for t in tokens})
+        action = next_action(rep, default, login=login, verdicts=verdicts)
+        rows = setup_rows(rep, default, action, verdicts)
+        said = {action["text"], *(r["problem"] for r in rows)}
+        return {"ok": True, "state": ACTIONS[action["id"]][0], "next_action": action, "setup": rows,
+                "forge_url": instance.get("url"), "forge_error": (instance.get("error") or {}).get("message"),
                 "tokens": tokens, "features": rep.get("features") or [],
-                "token_warnings": rep.get("token_warnings") or [],
+                "token_warnings": [w for w in rep.get("token_warnings") or [] if w not in said],
                 "next_step": rep.get("next_step"), "profiles": profiles,
                 "default_review_profile": default.default_review_profile,
-                "you": default.you or None, "you_suggestion": you.get("suggestion") or None,
+                "you": default.you or None, "you_suggestion": login or None, "you_source": source,
+                "switches": {key: bool(getattr(default, key)) for key in SWITCHES},
                 "reviewer": {"name": REVIEWER, "exists": REVIEWER in profiles,
                              "command": reviewer_command(profile.current_name(home))},
                 "settings_href": SETTINGS_HREF, "generated_at": int(now())}
@@ -327,56 +550,214 @@ def _plugin_root():
     return importlib.import_module(__package__)
 
 
-def owner_can_merge(get_setting, get_secret, *, transport: Any = None, now: Callable[[], float] = time.time) -> bool:
+def _who(rep: dict, probed: dict, settings: Any, get_secret, transport: Any) -> "tuple[str, Optional[str]]":
+    """``(login, source)`` of who the user probably is. The write token's own login is certain
+    (``write_token``); otherwise the owner of the repos Hermes sees (``repo_owner``), never an organisation."""
+    bot, owner = probed.get("bot") or {}, probed.get("owner") or {}
+    mine = owner.get("identity")
+    if owner.get("set") and mine and not owner.get("error") and mine != bot.get("identity"):
+        return mine, "write_token"
+    token = _mod("settings").load_credentials(get_secret).token
+    counts = (bot.get("repos") or {}).get("owners") or {}
+    if not (settings.url and token and counts and not bot.get("error")):
+        return "", None
+    client = _mod("client").ForgejoClient(settings.url, token, transport=transport)
+    login = suggest_login(client, counts, bot.get("identity") or "")
+    return (login, (rep.get("you") or {}).get("source") or "repo_owner") if login else ("", None)
+
+
+NEXT_TEXT = {"set_url": "Enter your Forgejo address.", "set_token": "Add the token of Hermes' account.",
+             "set_you": "Which Forgejo user are you?",
+             "dry_run": "Preview only: Hermes shows each write and sends none.", "none": ""}
+# Every next step: the badge it means, the button beside its sentence, the setup row it belongs to.
+# ``ready`` belongs to ``none`` alone, so the badge cannot say ready while a step is open.
+ACTIONS = {
+    "set_url": ("setup", "settings", "url"),
+    "set_token": ("setup", "settings", "bot"),
+    "fix_token": ("setup", "settings", "bot"),
+    "fix_scopes": ("setup", "settings", "bot"),
+    "add_repo": ("setup", "forgejo", "bot"),
+    "set_you": ("setup", "who", "you"),
+    "fix_owner_token": ("setup", "settings", "owner"),
+    "retry": ("unchecked", "retry", None),
+    "dry_run": ("preview", "write", None),
+    "none": ("ready", None, None),
+}
+_TOKEN_ACTION = {
+    "bot": {"unset": "set_token", "refused": "fix_token", "lacks_scopes": "fix_scopes", "no_repo": "add_repo",
+            "unchecked": "retry"},
+    "owner": {"refused": "fix_owner_token", "lacks_scopes": "fix_owner_token", "wrong_account": "fix_owner_token",
+              "unchecked": "retry"},
+}
+
+
+def token_verdicts(rep: dict, presence: Optional[dict] = None) -> dict:
+    """``{role: capabilities.token_verdict}`` for both tokens. ``presence`` ({role: bool}) says which fields
+    hold a value when the report stopped before it probed them."""
+    probed = {t.get("role"): t for t in rep.get("tokens") or []}
+    caps = _mod("capabilities")
+    out = {}
+    for role in ("bot", "owner"):
+        token = {"role": role, **(probed.get(role) or {})}
+        if presence is not None:
+            token["set"] = bool(presence.get(role))
+        out[role] = caps.token_verdict(token)
+    return out
+
+
+def next_action(rep: dict, settings: Any, *, login: str = "", verdicts: Optional[dict] = None) -> dict:
+    """The one thing to do next, read off the doctor's facts in the order the setup is done:
+    ``{id, text, button, row, login?}``. ``ACTIONS`` maps the id to the badge."""
+    instance = rep.get("instance") or {}
+    verdicts = verdicts or token_verdicts(rep)
+
+    def act(key: str, text: str = "", row: Optional[str] = None) -> dict:
+        _badge, button, own_row = ACTIONS[key]
+        out = {"id": key, "text": _cap(text or NEXT_TEXT[key], 140), "button": button, "row": row or own_row}
+        if key == "set_you" and login:
+            out["login"] = login
+        return out
+
+    def token_step(role: str) -> Optional[dict]:
+        verdict = verdicts[role]
+        key = _TOKEN_ACTION[role].get(verdict["state"])
+        return act(key, verdict["text"] or "", row=role) if key else None
+
+    url, error = instance.get("url"), instance.get("error")
+    if not url:
+        return act("set_url")
+    if error:
+        status = error.get("status")
+        if status in (401, 403) and verdicts["bot"]["state"] != "unset":
+            return act("fix_token", f"Forgejo refused Hermes' token ({status}). Replace it.")
+        if status and status >= 500:
+            return act("retry", f"Forgejo failed ({status}). Try again.", row="url")
+        if status:
+            return act("set_url", f"No Forgejo answered at {url} ({status}). Check your Forgejo address.")
+        return act("set_url", f"Hermes cannot reach {url}. Check your Forgejo address.")
+    if instance.get("supported") is False:
+        return act("set_url", instance.get("reason") or "This Forgejo version is not supported.")
+    return (token_step("bot") or (None if settings.you else act("set_you")) or token_step("owner")
+            or act("dry_run" if settings.dry_run else "none"))
+
+
+def setup_rows(rep: dict, settings: Any, action: dict, verdicts: dict) -> list:
+    """The four setup rows as the page draws them: ``[{id, state, value, problem, button}]``. ``state`` is
+    done, todo, problem, unchecked (Forgejo could not say) or optional. ``problem`` is the row's sentence
+    unless the next step already says it; ``button`` is None for the row whose button the next step carries."""
+    instance = rep.get("instance") or {}
+    url = instance.get("url") or ""
+    bot, owner = verdicts["bot"], verdicts["owner"]
+    url_state = "todo" if not url else "done"
+    if url and (instance.get("error") or instance.get("supported") is False):
+        url_state = "unchecked" if action["id"] == "retry" else "problem"
+    rows = [
+        ("url", url_state, re.sub(r"^https?://", "", url).rstrip("/"), None),
+        ("bot", {"unset": "todo", "ok": "done", "unchecked": "unchecked"}.get(bot["state"], "problem"), bot["value"], bot),
+        ("you", "done" if settings.you else "todo", f"@{settings.you}" if settings.you else "", None),
+        ("owner", {"unset": "optional", "ok": "done", "unchecked": "unchecked"}.get(owner["state"], "problem"),
+         owner["value"] or "off", owner),
+    ]
+    out = []
+    for row_id, state, value, verdict in rows:
+        problem = (verdict or {}).get("text")
+        button = "who" if row_id == "you" and state == "todo" else "settings"
+        if verdict and verdict["state"] == "unchecked":
+            button = "retry"
+        if verdict and verdict["state"] == "no_repo":
+            button = "forgejo"
+        mine = action.get("row") == row_id
+        out.append({"id": row_id, "state": state, "value": value,
+                    "problem": None if mine or problem == action.get("text") else problem,
+                    "button": None if mine else button})
+    return out
+
+
+def _write_token_facts(get_setting, get_secret, *, transport: Any = None, now: Callable[[], float] = time.time,
+                       refresh: bool = False) -> dict:
+    """What the user's write token gives: ``{can_merge, login, source}``. Finding out runs the doctor, whose
+    scope probes are requests that are not reads, so the answer is kept for an hour per pair of tokens: a
+    poll with nobody clicking must not repeat them. A check Forgejo could not finish is not kept."""
     creds = _mod("settings").load_credentials(get_secret)
     if not creds.owner_token:
-        return False  # never probe for a field that is empty
-    status, body = api_settings(get_setting, get_secret, transport=transport, now=now)
+        return {"can_merge": False, "login": None, "source": None}  # never probe for a field that is empty
+    held = "\0".join((str(get_setting("url", "") or ""), creds.token or "", creds.owner_token))
+    key = ("write_token", hashlib.sha256(held.encode("utf-8")).hexdigest())
+    with _lock:
+        hit = _cache.get(key)
+        if hit and not refresh and now() - hit[0] < WRITE_TOKEN_TTL_S:
+            return hit[1]
+    body = api_settings(get_setting, get_secret, transport=transport, now=now, refresh=refresh)[1]
     feat = next((f for f in body.get("features") or [] if f.get("id") == "owner_merge"), None)
-    return bool(feat and feat.get("status") == "available")
+    facts = {"can_merge": bool(feat and feat.get("status") == "available"),
+             "login": body.get("you_suggestion"), "source": body.get("you_source")}
+    owner = next((t for t in body.get("tokens") or [] if t.get("role") == "owner"), None)
+    if body.get("features") and _mod("capabilities").token_verdict(owner)["state"] != "unchecked":
+        with _lock:
+            _cache[key] = (now(), facts)
+    return facts
+
+
+def owner_can_merge(get_setting, get_secret, *, transport: Any = None, now: Callable[[], float] = time.time,
+                    refresh: bool = False) -> bool:
+    return _write_token_facts(get_setting, get_secret, transport=transport, now=now, refresh=refresh)["can_merge"]
+
+
+class _NoFlowState:
+    """The flow store of an install whose data folder does not exist yet: no flow has run there."""
+
+    def all_prs(self) -> list:
+        return []
+
+    def engine(self) -> dict:
+        return {}
 
 
 def api_desk(get_setting, get_secret, *, data_dir: Any, transport: Any = None, refresh: bool = False,
              now: Callable[[], float] = time.time) -> "tuple[int, dict]":
-    if not data_dir:
-        return 200, {"ok": False, "error": "no_data_dir", "message": "The plugin's data folder is not available, so "
-                     "there is no flow state to show.", "settings_href": SETTINGS_HREF}
-
     def make() -> dict:
         access = _mod("access").load_access(get_setting, get_secret, transport=transport, lane="agent")
-        store = _mod("flows.state").FlowStore(data_dir)
-        return build_desk(access, store, can_merge=owner_can_merge(get_setting, get_secret, transport=transport,
-                                                                   now=now), now=now)
+        store = _mod("flows.state").FlowStore(data_dir) if data_dir else _NoFlowState()
+        mine = _write_token_facts(get_setting, get_secret, transport=transport, now=now, refresh=refresh)
+        hint = None
+        if not access.settings.you and mine["login"]:
+            hint = {"login": mine["login"], "source": mine["source"]}
+        return build_desk(access, store, can_merge=mine["can_merge"], now=now, you_hint=hint)
     try:
-        return 200, _cached(("desk", str(data_dir)), DESK_TTL_S, refresh, make, now)
+        body = _cached(("desk", str(data_dir)), DESK_TTL_S, refresh, make, now)
     except Exception as exc:
         return 200, _refusal_body(exc)
+    return 200, {**body, "age_s": max(0, int(now() - body["generated_at"]))}
 
 
 def api_merge(get_setting, get_secret, body: Any, *, data_dir: Any, transport: Any = None,
               now: Callable[[], float] = time.time) -> "tuple[int, dict]":
     """The desk's merge button: the user's click, his write token (owner lane), pinned to the head SHA the
     desk showed. A pull request with a flow merges only while the flow's human gate waits for him; one
-    without a flow only while it is open and still requests his review (``you``, 0.0.15). Forgejo's branch
+    without a flow only while it is open and still requests his review (``you``). Forgejo's branch
     protection and required checks apply either way."""
     body = body if isinstance(body, dict) else {}
     acc = _mod("access")
     try:
         repo = acc.parse_repo(body.get("repo"))
-        number = int(body.get("number") or 0)
+        number = body.get("number")
+        number = int(number) if isinstance(number, (int, str)) and not isinstance(number, bool) else 0
         sha = str(body.get("head_sha") or "")
-        if number <= 0 or not re.fullmatch(r"[0-9a-f]{40}", sha):
-            return 400, {"ok": False, "error": "bad_request", "message": "repo, number and the 40-digit head_sha "
-                                                                         "are required."}
+    except (acc.Refusal, ValueError):
+        repo, number, sha = "", 0, ""
+    if not repo or number <= 0 or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        return _bad("repo (owner/repo), number and the 40-digit head_sha are required.")
+    try:
         access = acc.load_access(get_setting, get_secret, transport=transport, lane="owner")
         writer = access.owner_writer()  # refuses with the dark sentence when the field is empty
         if not owner_can_merge(get_setting, get_secret, transport=transport, now=now):
             raise acc.Refusal("dark", _mod("capabilities").dark_sentence("owner_merge"), "owner_token")
         st = _mod("flows.state").FlowStore(data_dir).load_pr(repo, number) if data_dir else None
-        if st and not st.get("closed") and not st.get("merged") and tab_of(st) != "waiting":
-            return 409, {"ok": False, "error": "not_waiting", "message": f"{repo}#{number} is not waiting for you: "
-                         "its flow has a gate that is not done yet. Nothing was merged."}
-        flow_waiting = bool(st) and tab_of(st) == "waiting"
+        mine = tab_of(st, you=access.settings.you) == "waiting" if st else False
+        if st and not st.get("closed") and not st.get("merged") and not mine:
+            return 409, {"ok": False, "error": "not_waiting",
+                         "message": f"{repo}#{number} does not wait for your merge. Nothing was merged."}
+        flow_waiting = mine
         pr = writer.get(f"/repos/{repo}/pulls/{number}").data or {}
         head = (pr.get("head") or {}).get("sha") or ""
         if pr.get("merged") or pr.get("state") != "open":
@@ -386,8 +767,7 @@ def api_merge(get_setting, get_secret, body: Any, *, data_dir: Any, transport: A
             asked = {str((u or {}).get("login") or "").lower() for u in pr.get("requested_reviewers") or []}
             if not you or you not in asked:
                 return 409, {"ok": False, "error": "not_requested", "message": f"{repo}#{number} has no flow and does "
-                             f"not request your review ({access.settings.you or 'setting you is empty'}), so the desk "
-                             "does not merge it. Nothing was merged."}
+                             "not request your review, so the desk does not merge it. Nothing was merged."}
         if head != sha or (flow_waiting and st.get("head_sha") != sha):
             return 409, {"ok": False, "error": "head_moved", "message": f"The head moved to {head[:12]} after the desk "
                          "showed it; " + ("the flow checks the new head first." if flow_waiting else "reload the desk and look at the new commits first.") + " Nothing was merged."}
@@ -395,15 +775,79 @@ def api_merge(get_setting, get_secret, body: Any, *, data_dir: Any, transport: A
         after = writer.get(f"/repos/{repo}/pulls/{number}").data or {}
     except acc.Refusal as exc:
         return 403, _refusal_body(exc)
-    except Exception as exc:  # a forge error: say what it said
+    except Exception as exc:  # Forgejo answered with an error: say what it said
         return 502, {"ok": False, "error": "forge_error", "message": getattr(exc, "message", str(exc))}
     merged = bool(after.get("merged"))
-    _log(data_dir, {"at": int(now()), "action": "merge", "repo": repo, "number": number, "head_sha": sha,
-                    "merged": merged, "merge_sha": after.get("merge_commit_sha"), "lane": "owner"})
     clear_cache()
+    note = _logged(data_dir, {"at": int(now()), "action": "merge", "repo": repo, "number": number, "head_sha": sha,
+                              "merged": merged, "merge_sha": after.get("merge_commit_sha"), "lane": "owner"})
     return 200, {"ok": merged, "merged": merged, "merge_sha": after.get("merge_commit_sha"),
                  "message": (f"Merged {repo}#{number} at {sha[:12]} with your account." if merged else
-                             "The forge accepted the request but the pull request is not merged; open it in Forgejo.")}
+                             "Forgejo accepted the request but the pull request is not merged. Open it in Forgejo."),
+                 **note}
+
+
+def _bad(message: str) -> "tuple[int, dict]":
+    return 400, {"ok": False, "error": "bad_request", "message": message}
+
+
+def api_set_setting(body: Any, *, save: Callable[[str, Any], None], get_setting, get_secret, transport: Any = None,
+                    data_dir: Any = None, now: Callable[[], float] = time.time) -> "tuple[int, dict]":
+    """The settings page's switches and its "Use this login" button: saves one of ``SETTABLE`` on the user's
+    click. ``save(key, value)`` writes the profile's plugin setting. ``you`` must be a user Forgejo knows, not
+    an organisation; an empty string clears it. Tokens and every other setting stay in Hermes' own form."""
+    body = body if isinstance(body, dict) else {}
+    key, value = body.get("key"), body.get("value")
+    if key not in SETTABLE:
+        return _bad("This page saves only " + ", ".join(SETTABLE[:-1]) + " and " + SETTABLE[-1] + ".")
+    if key != "you":
+        if not isinstance(value, bool):
+            return _bad(f"{key} must be true or false.")
+    else:
+        if not isinstance(value, str):
+            return _bad("Enter a Forgejo user name.")
+        value = value.strip().lstrip("@")
+        if value:
+            if not _mod("settings")._USER_RE.match(value):
+                return _bad(f"{_cap(value, 60)!r} is not a Forgejo user name.")
+            acc = _mod("access")
+            try:
+                client = acc.load_access(get_setting, get_secret, transport=transport, lane="agent").reader()
+            except acc.Refusal as exc:  # no address or agent token yet: the name cannot be checked
+                return 400, _refusal_body(exc)
+            try:
+                found = client.get(f"/users/{value}").data or {}
+            except Exception as exc:
+                if getattr(exc, "status", None) == 404:
+                    return _bad(f"Forgejo has no user {value}.")
+                return 502, {"ok": False, "error": "forge_error", "message": getattr(exc, "message", str(exc))}
+            kind = _account_kind(client, value)
+            if kind == "org":
+                return _bad(f"{value} is an organisation. Enter your own user name.")
+            if kind is None:
+                return 502, {"ok": False, "error": "forge_error",
+                             "message": f"Forgejo did not say whether {value} is a user or an organisation."}
+            value = str(found.get("login") or value)
+    try:
+        save(key, value)
+    except PermissionError as exc:
+        return 403, {"ok": False, "error": "not_allowed", "message": str(exc)}
+    except Exception as exc:
+        return 500, {"ok": False, "error": "save_failed",
+                     "message": f"The setting was not saved ({type(exc).__name__})."}
+    clear_cache()
+    return 200, {"ok": True, "key": key, "value": value,
+                 **_logged(data_dir, {"at": int(now()), "action": "setting", "key": key, "value": value})}
+
+
+def _logged(data_dir: Any, record: dict) -> dict:
+    """Append to the action log. The action itself already happened, so a log that cannot be written is a
+    note on the answer, never a failed answer."""
+    try:
+        _log(data_dir, record)
+    except OSError as exc:
+        return {"note": f"Done, but the action log could not be written ({type(exc).__name__})."}
+    return {}
 
 
 def _log(data_dir: Any, record: dict) -> None:
@@ -422,7 +866,7 @@ def reviewer_command(source: str) -> str:
 
 def api_create_reviewer(body: Any, *, source: str, home: Any = None, run: Callable = subprocess.run,
                         hermes: Optional[str] = None) -> "tuple[int, dict]":
-    """N20 fallback, on the user's click in the desk's settings: clone his current profile as a reviewer
+    """On the user's click in the desk's settings: clone his current profile as a reviewer
     profile, give it a reviewer SOUL.md, and strip every Forgebrücke token from its .env (a reviewer writes
     its verdict file only). When the route cannot run Hermes, answer with the exact command."""
     profile = _mod("profile")
@@ -433,24 +877,36 @@ def api_create_reviewer(body: Any, *, source: str, home: Any = None, run: Callab
     exe = hermes if hermes is not None else shutil.which("hermes")
     if not exe or not source:
         return 200, {"ok": False, "error": "run_it_yourself", "command": command,
-                     "message": "This host cannot run Hermes from the desk. Run the command in a terminal on the "
-                                "Hermes host, then pick the profile here."}
-    done = run([exe, "profile", "create", REVIEWER, "--clone-from", source, "--no-alias",
-                "--description", "Forgebrücke reviewer: writes verdict files only"],
-               capture_output=True, text=True, timeout=120)
+                     "message": "Run this command in a terminal on the Hermes host. Then pick the profile in "
+                                "Hermes' settings."}
+    def failed(message: str) -> "tuple[int, dict]":
+        clear_cache()
+        return 200, {"ok": False, "error": "create_failed", "command": command, "message": message}
+    try:
+        done = run([exe, "profile", "create", REVIEWER, "--clone-from", source, "--no-alias",
+                    "--description", "Forgebrücke reviewer: writes verdict files only"],
+                   capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return failed("Hermes did not finish within 120 seconds. Run the command in a terminal on the Hermes host.")
+    except OSError as exc:
+        return failed(f"Hermes could not be started ({type(exc).__name__}). Run the command in a terminal on the "
+                      "Hermes host.")
     if getattr(done, "returncode", 1) != 0:
-        return 200, {"ok": False, "error": "create_failed", "command": command,
-                     "message": _cap(getattr(done, "stderr", "") or getattr(done, "stdout", ""), 400)}
+        return failed(_cap(getattr(done, "stderr", "") or getattr(done, "stdout", ""), 400))
     root = profile.profiles_root(home)
     target = Path(root) / REVIEWER if root else None
-    if target is not None and target.is_dir():
-        (target / "SOUL.md").write_text(REVIEWER_SOUL, encoding="utf-8")
-        env = target / ".env"
-        if env.exists():
-            kept = [ln for ln in env.read_text(encoding="utf-8").splitlines()
-                    if not ln.strip().startswith("FORGEBRUECKE_")]
-            env.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+    try:
+        if target is not None and target.is_dir():
+            (target / "SOUL.md").write_text(REVIEWER_SOUL, encoding="utf-8")
+            env = target / ".env"
+            if env.exists():
+                kept = [ln for ln in env.read_text(encoding="utf-8").splitlines()
+                        if not ln.strip().startswith("FORGEBRUECKE_")]
+                env.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+    except OSError as exc:
+        return failed(f"{REVIEWER} exists now, but its SOUL.md or .env could not be written "
+                      f"({type(exc).__name__}). Check both files before a flow uses it.")
     clear_cache()
     return 200, {"ok": True, "created": True, "name": REVIEWER,
-                 "message": f"Created {REVIEWER} from {source}, with a reviewer SOUL.md and no Forgebrücke tokens. "
-                            "Set it as the profile that runs agent reviews in the plugin settings."}
+                 "message": f"Created {REVIEWER}. Next, pick it as the profile that runs agent reviews in Hermes' "
+                            "settings."}

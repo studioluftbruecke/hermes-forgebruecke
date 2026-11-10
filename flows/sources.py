@@ -1,4 +1,4 @@
-"""Where flows come from (D10, provisional): the repo's own flow file, and per-profile override files.
+"""Where flows come from: the repo's own flow file, and per-profile override files.
 
 - Repo file: ``<flows_path>`` (default ``.forgebruecke/flows.yml``) on the repo's default branch. It
   applies to that repo only, whatever its ``repos`` line says, so a file in one repo cannot start
@@ -6,10 +6,11 @@
 - Override file: ``<data_dir>/flows/overrides/<flow>.yml``. Same shape; its ``repos`` globs name where it
   applies; a flow id defined here wins over the repo file's flow of the same id.
 
-A flow runs on a repo only when that repo's rule in ``writes`` lists the flow id in ``flows`` and Hermes'
-Forgejo account has write access there: the flow file says how, the user's settings say where, and Forgejo
-says whether the account may write at all (D27). The agent cannot widen the rule without the settings
-guard asking the user.
+A flow runs on a repo only when that repo's rule in ``writes`` lists the flow id first in ``flows`` and
+Hermes' account has write access there: the flow file says how, the user's settings say where, and
+Forgejo says whether the account may write at all. One flow runs per repo, because a pull request has one
+state: a rule that lists more gets a note. The agent cannot widen the rule without the settings guard asking
+the user.
 """
 from __future__ import annotations
 
@@ -36,8 +37,10 @@ class Loaded:
 @dataclass
 class Plan:
     active: list = field(default_factory=list)    # [(repo, FlowDef)]
+    paused: list = field(default_factory=list)    # [(repo, FlowDef)]: would run there, and is paused
     loaded: list = field(default_factory=list)    # every Loaded, valid or not
     notes: list = field(default_factory=list)     # sentences for the desk and the doctor
+    unread: list = field(default_factory=list)    # repos whose flow file could not be read this time
 
 
 def profile_warnings(flow) -> list:
@@ -45,8 +48,8 @@ def profile_warnings(flow) -> list:
     known = _mod("profile").list_profiles()
     if not known or flow is None:
         return []
-    return [f"the {g.key} gate names the profile {g.by}, which does not exist here (profiles: {', '.join(known)}); "
-            "assign one you have, or create a reviewer profile from the desk's settings"
+    return [f"the {g.key} gate names the profile {g.by}, which does not exist here (profiles: {', '.join(known)}). "
+            'Assign one you have, or click "Create a reviewer profile" on the Forgebrücke page.'
             for g in flow.gates if g.type == "review" and g.by not in known]
 
 
@@ -95,7 +98,7 @@ def visible_repos(reader) -> list:
 
 def plan(reader, settings, store, *, visible: Optional[list] = None, only_repo: str = "") -> Plan:
     """Which flows run on which repos now. Network: the repo list, one contents read per ruled repo. A ruled repo
-    where the agent account has read access only runs no flow (its statuses and comments would be refused)."""
+    where Hermes' account has read access only runs no flow (its statuses and comments would be refused)."""
     result = Plan()
     read_only: set = set()
     if visible is None:
@@ -104,17 +107,24 @@ def plan(reader, settings, store, *, visible: Optional[list] = None, only_repo: 
         read_only = {r.get("full_name") for r in items if not (r.get("permissions") or {}).get("push", True)}
     ruled = [r for r in visible if (settings.explicit_rule(r) is not None and settings.explicit_rule(r).flows)]
     for repo in [r for r in ruled if r in read_only]:
-        result.notes.append(f"{repo}: Hermes' Forgejo account has read access only, so its flows do not run; give it "
+        result.notes.append(f"{repo}: Hermes' account has read access only, so its flows do not run. Give it "
                             f"write access in {settings.url.rstrip('/')}/{repo}/settings/collaboration")
     ruled = [r for r in ruled if r not in read_only]
     if only_repo:
         ruled = [r for r in ruled if r.lower() == only_repo.lower()]
+    first: dict = {}
+    for repo in ruled:
+        first[repo], *rest = settings.explicit_rule(repo).flows
+        if rest:
+            result.notes.append(f"{repo}: only the first flow of a rule runs. {first[repo]} runs, {', '.join(rest)} "
+                                f"{'does' if len(rest) == 1 else 'do'} not.")
     by_id: dict = {}
     for repo in ruled:
         try:
             text = read_repo_file(reader, repo, settings.flows_path)
         except Exception as e:  # one unreadable repo must not stop the others
             result.notes.append(f"{repo}: the flow file could not be read ({getattr(e, 'message', e)})")
+            result.unread.append(repo)
             continue
         if text is None:
             continue
@@ -144,18 +154,17 @@ def plan(reader, settings, store, *, visible: Optional[list] = None, only_repo: 
                     continue
                 if not item.flow.applies_to(repo):
                     continue
-                rule = settings.explicit_rule(repo)
-                if fid not in rule.flows:
+                if fid != first[repo]:
                     continue
+                if (repo, fid) in seen:
+                    continue
+                seen.add((repo, fid))
                 if store.is_paused(fid, repo):
                     result.notes.append(f"{fid} on {repo} is paused")
-                    continue
-                if (repo, fid) not in seen:
-                    seen.add((repo, fid))
+                    result.paused.append((repo, item.flow))
+                else:
                     result.active.append((repo, item.flow))
     for repo in ruled:
-        rule = settings.explicit_rule(repo)
-        for fid in rule.flows:
-            if fid not in by_id:
-                result.notes.append(f"{repo}: the rule lists flow {fid}, but no valid flow file defines it")
+        if first[repo] not in by_id:
+            result.notes.append(f"{repo}: the rule lists flow {first[repo]}, but no valid flow file defines it")
     return result

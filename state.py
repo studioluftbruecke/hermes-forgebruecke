@@ -1,6 +1,6 @@
 """Plugin state: small pointers in ``ctx.state``, bulky records as files under its ``data_dir``.
 
-Keys (PLAN.md M1): ``version`` (state schema), ``threads`` (repo#n -> session id), ``seen`` (the last
+Keys: ``version`` (state schema), ``threads`` (repo#n -> session id), ``seen`` (the last
 500 handled notification or comment keys), ``gates``, ``claims``, ``repos``, ``capabilities``. Run
 records and logs never go into the key/value store (it has a 10 MB quota); they go to
 ``<data_dir>/runs/``.

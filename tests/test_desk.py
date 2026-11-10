@@ -98,7 +98,7 @@ def test_desk_rows_counts_checks_and_last_comment(tmp_path):
     f = forge()
     store = store_with(tmp_path, pr_state(3), pr_state(4, ("failed", "pending", "pending")),
                        pr_state(5, ("passed", "passed", "waiting"), merged=True))
-    gs, sec = getters()
+    gs, sec = getters(you="acme")
     status, body = desk.api_desk(gs, sec, data_dir=tmp_path, transport=f, now=lambda: 1000)
     assert status == 200 and body["ok"]
     assert body["label"] == "Forgejo · 1" and body["counts"] == {"waiting": 1, "running": 0, "blocked": 1}
@@ -112,7 +112,7 @@ def test_desk_rows_counts_checks_and_last_comment(tmp_path):
     assert first["flow"] == "demo" and first["reason"] is None
     assert body["repos"] == [{"repo": DEMO, "right": "write", "url": f"{BASE}/{DEMO}",
                               "collaboration_url": f"{BASE}/{DEMO}/settings/collaboration", "private": True,
-                              "flows": ["demo"], "mentions": True, "admin": False, "open_rows": 2}]
+                              "flows": ["demo"], "mentions": True, "admin": False, "open_rows": 2, "open_prs": 1}]
     assert not any(w[0] != "GET" for w in f.writes)  # the desk only reads
 
 
@@ -122,7 +122,8 @@ def test_without_you_the_desk_says_so_and_suggests_the_owner_of_the_agents_repos
     gs, sec = getters()
     body = desk.api_desk(gs, sec, data_dir=tmp_path, transport=f, now=lambda: 1000)[1]
     note = body["waiting_note"]
-    assert "setting you" in note["message"] and note["suggestion"] == "acme" and note["settings_href"] == desk.SETTINGS_HREF
+    assert note == {"message": "Which Forgejo user are you?", "suggestion": "acme", "source": "repo_owner",
+                    "settings_href": desk.SETTINGS_HREF}
     assert body["counts"]["waiting"] == 0 and body["label"] == "Forgejo" and body["you"] is None
     assert not any(c[1].endswith("/repos/issues/search") for c in f.calls)
 
@@ -198,18 +199,13 @@ def test_a_failing_review_search_keeps_the_flow_rows_and_says_why(tmp_path):
     gs, sec = getters(you="acme")
     body = desk.build_desk(access_mod.load_access(gs, sec, transport=broken), state_mod.FlowStore(tmp_path))
     assert [r["number"] for r in body["rows"]] == [3]
-    assert any("request your review could not be read" in n for n in body["notes"])
+    assert body["notes"] == ["Forgejo answered 403. Review requests are missing."]
 
 
 def test_desk_without_tokens_explains_and_points_at_the_settings(tmp_path):
     status, body = desk.api_desk(lambda k, d=None: {"url": BASE}.get(k, d), {}.get, data_dir=tmp_path)
     assert status == 200 and body["ok"] is False and body["error"] == "not_configured"
-    assert body["settings_href"] == desk.SETTINGS_HREF and "FORGEBRUECKE_BOT_ACCOUNT_TOKEN" in body["message"]
-
-
-def test_desk_without_a_data_dir_says_so():
-    gs, sec = getters()
-    assert desk.api_desk(gs, sec, data_dir=None)[1]["error"] == "no_data_dir"
+    assert body["settings_href"] == desk.SETTINGS_HREF and body["message"] == desk.NEXT_TEXT["set_token"]
 
 
 def test_desk_renders_stored_rows_when_the_forge_is_down(tmp_path):
@@ -225,7 +221,7 @@ def test_desk_renders_stored_rows_when_the_forge_is_down(tmp_path):
 
 def merge(tmp_path, f, tokens, sha=HEAD_SHA, states=("passed", "passed", "waiting")):
     store_with(tmp_path, pr_state(3, states))
-    gs, sec = getters(tokens)
+    gs, sec = getters(tokens, you="acme")
     return desk.api_merge(gs, sec, {"repo": DEMO, "number": 3, "head_sha": sha}, data_dir=tmp_path, transport=f)
 
 
@@ -250,7 +246,7 @@ def test_merge_with_his_write_token_pins_the_head_and_never_uses_the_bot(tmp_pat
             used.append(headers.get("Authorization"))
         return orig(method, url, headers, body, timeout)
     store_with(tmp_path, pr_state(3))
-    gs, sec = getters(("bot", "owner"))
+    gs, sec = getters(("bot", "owner"), you="acme")
     status, body = desk.api_merge(gs, sec, {"repo": DEMO, "number": 3, "head_sha": HEAD_SHA}, data_dir=tmp_path,
                                   transport=rec)
     assert status == 200, body

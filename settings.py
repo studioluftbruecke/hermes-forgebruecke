@@ -5,19 +5,23 @@ Shapes:
 - ``Rule(repo_glob, mentions, flows, targets)``: one row of the ``writes`` setting (label "Per-repo
   rules"). It says where flows run, whether Hermes answers mentions there and which branches a pull
   request may target. It grants nothing: what Hermes may read or write in a repo is the Forgejo
-  collaborator right of its account there (0.0.14, D27), asked in ``access.py``. ``mentions`` is on
-  unless a rule switches it off; ``targets`` empty means the repo's default branch. The keys ``read``,
+  collaborator right of its account there (since 0.0.14), asked in ``access.py``. ``mentions`` is on
+  unless a rule switches it off. What cannot be read switches it off too, as it may be the opt-out: a
+  value that is neither true nor false, an unknown key in a rule that does not state ``mentions``, and a
+  rule without a readable ``repo_glob`` (then for every later rule and every repo no rule names).
+  ``targets`` empty means the repo's default branch. The keys ``read``,
   ``comment`` and ``write`` of earlier versions are ignored with a warning.
 - ``Settings``: every non-secret setting from ``config_schema``, already validated, plus the
   ``warnings`` produced while validating (an invalid value falls back to its default and says so).
   ``you`` is the user's own Forgejo login: the desk's Waiting for me lists the pull requests that
   request his review, and ``forgejo_create_pr`` requests his review by default. With
   ``review_every_pr`` (on by default) the flows tick asks him on every other open pull request too, and
-  the desk lists one that does not ask him yet (``review_requests.py``, D33).
+  the desk lists one that does not ask him yet (``review_requests.py``).
 - ``Credentials(token, owner_token)``: the agent account's token (required) and an optional write token
-  of the user's own account (only the desk's Merge button, on his click, D30). Their ``repr`` never
-  shows a value, and nothing in this plugin logs them. Which token a call uses is decided by its lane
-  (``access.py``), not by the caller.
+  of the user's own account (only the desk's Merge button, on his click). Their ``repr`` never
+  shows a value, and nothing in this plugin logs them. A token with a space, a line break or a
+  non-ASCII character counts as unset, and ``problems()`` says which field to enter again. Which token a
+  call uses is decided by its lane (``access.py``), not by the caller.
 
 Settings live in ``config.yaml`` under ``plugins.entries.forgebruecke.settings``; the two secrets live in
 the profile's ``.env`` as ``FORGEBRUECKE_BOT_ACCOUNT_TOKEN`` and ``FORGEBRUECKE_PERSONAL_WRITE_TOKEN``
@@ -26,8 +30,9 @@ the profile's ``.env`` as ``FORGEBRUECKE_BOT_ACCOUNT_TOKEN`` and ``FORGEBRUECKE_
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Optional
 
 TOKEN_ENV = "FORGEBRUECKE_BOT_ACCOUNT_TOKEN"
@@ -35,7 +40,7 @@ OWNER_TOKEN_ENV = "FORGEBRUECKE_PERSONAL_WRITE_TOKEN"
 # Names before 0.0.12. Never read as a token: only so the settings page can say "found under the old name,
 # enter it again". Remove before the first public release (no published build used them).
 RENAMED_FROM = {TOKEN_ENV: "FORGEBRUECKE_TOKEN", OWNER_TOKEN_ENV: "FORGEBRUECKE_OWNER_TOKEN"}
-# Settings and rule keys of earlier versions, read only to say they are ignored now (0.0.14, D27).
+# Settings and rule keys of earlier versions, read only to say they are ignored now (since 0.0.14).
 RETIRED_SETTINGS = ("read_scope", "badge_meaning")
 RETIRED_RULE_KEYS = ("read", "comment", "write")
 RULE_KEYS = ("repo_glob", "mentions", "flows", "targets")
@@ -93,13 +98,14 @@ class Settings:
     dry_run: bool = True
     review_every_pr: bool = True
     warnings: tuple = field(default=(), compare=False)
+    mentions_elsewhere: bool = True  # in a repo no rule names; off when a rule could not be read
 
     def rule_for(self, repo: str) -> Rule:
         """First rule whose glob matches, else the default (mentions on, no flow, default branch only)."""
         for rule in self.writes:
             if rule.matches(repo):
                 return rule
-        return Rule(repo_glob=repo)
+        return Rule(repo_glob=repo, mentions=self.mentions_elsewhere)
 
     def explicit_rule(self, repo: str) -> Optional[Rule]:
         return next((r for r in self.writes if r.matches(repo)), None)
@@ -113,14 +119,30 @@ class Settings:
                 "dry_run": self.dry_run, "review_every_pr": self.review_every_pr}
 
 
-class Credentials:
-    """The agent account's token and the optional write token of the user's own account. Never printable."""
+_TOKEN_RE = re.compile(r"[\x21-\x7e]+")
 
-    __slots__ = ("_token", "_owner_token")
+
+def _usable_token(value: Optional[str], name: str, problems: list) -> Optional[str]:
+    value = (value or "").strip()
+    if not value or _TOKEN_RE.fullmatch(value):
+        return value or None
+    found = "a space or line break" if re.search(r"\s", value) else "a character no token has"
+    problems.append(f"{name} contains {found}. Enter it again.")
+    return None
+
+
+class Credentials:
+    """The agent account's token and the optional write token of the user's own account. Never printable.
+
+    A value that is not printable ASCII cannot go into an HTTP header, and urllib's error for it quotes the
+    value. Such a token counts as unset, and ``problems()`` names the field."""
+
+    __slots__ = ("_token", "_owner_token", "_problems")
 
     def __init__(self, token: Optional[str], owner_token: Optional[str] = None) -> None:
-        self._token = (token or "").strip() or None
-        self._owner_token = (owner_token or "").strip() or None
+        self._problems: list = []
+        self._token = _usable_token(token, "Hermes' token", self._problems)
+        self._owner_token = _usable_token(owner_token, "Your write token", self._problems)
 
     @property
     def token(self) -> Optional[str]:
@@ -132,6 +154,10 @@ class Credentials:
 
     def presence(self) -> dict:
         return {TOKEN_ENV: self._token is not None, OWNER_TOKEN_ENV: self._owner_token is not None}
+
+    def problems(self) -> list:
+        """One sentence per token that was dropped; the value is never part of it."""
+        return list(self._problems)
 
     def __repr__(self) -> str:
         p = self.presence()
@@ -145,35 +171,53 @@ def load_credentials(get_secret: SecretGetter) -> Credentials:
     return Credentials(get_secret(TOKEN_ENV), get_secret(OWNER_TOKEN_ENV))
 
 
-def _as_bool(key: str, value: Any, warnings: list) -> bool:
+_BOOL_WORDS = {"true": True, "yes": True, "on": True, "1": True, "false": False, "no": False, "off": False, "0": False}
+
+
+def _read_bool(value: Any) -> Optional[bool]:
+    """True or False for a bool or one of the words a ``hermes config set`` stores, else None."""
     if isinstance(value, bool):
         return value
-    if isinstance(value, str) and value.strip().lower() in ("true", "false", "yes", "no", "on", "off", "1", "0"):
-        return value.strip().lower() in ("true", "yes", "on", "1")
-    warnings.append(f"{key}: {value!r} is not true or false; using {DEFAULTS[key]}.")
-    return DEFAULTS[key]
+    return _BOOL_WORDS.get(value.strip().lower()) if isinstance(value, str) else None
+
+
+def _as_bool(key: str, value: Any, warnings: list) -> bool:
+    read = _read_bool(value)
+    if read is None:
+        warnings.append(f"{key}: {value!r} is not true or false; using {DEFAULTS[key]}.")
+        return DEFAULTS[key]
+    return read
+
+
+_OFF_FROM_HERE = "Until then mentions are off wherever no earlier rule applies."
 
 
 def _parse_rule(i: int, raw: Any, warnings: list) -> Optional[Rule]:
     where = f"writes[{i}]"
     if not isinstance(raw, dict):
-        warnings.append(f"{where}: a rule must be a mapping like {{repo_glob: owner/repo, flows: [demo]}}; ignored.")
+        warnings.append(f"{where}: a rule must be a mapping like {{repo_glob: owner/repo}}. {_OFF_FROM_HERE}")
         return None
     glob = str(raw.get("repo_glob") or "").strip()
+    if glob == "*":
+        glob = "*/*"
     if not _REPO_GLOB_RE.match(glob):
-        warnings.append(f"{where}: repo_glob {glob!r} must look like owner/repo (wildcards allowed); rule ignored.")
+        warnings.append(f"{where}: repo_glob {glob!r} must look like owner/repo (wildcards allowed). {_OFF_FROM_HERE}")
         return None
     retired = [k for k in RETIRED_RULE_KEYS if k in raw]
     if retired:
         warnings.append(f"{where}: {', '.join(retired)} no longer apply and are ignored. What Hermes may read or "
-                        "write in a repo is its Forgejo account's right there (the repo's Settings → Collaborators).")
-    unknown = sorted(set(raw) - set(RULE_KEYS) - set(RETIRED_RULE_KEYS))
-    if unknown:
+                        "write in a repo is the access of Hermes' account there (the repo's Settings → Collaborators).")
+    unknown = sorted(str(k) for k in raw if k not in RULE_KEYS and k not in RETIRED_RULE_KEYS)
+    mentions = _read_bool(raw.get("mentions", True))
+    if mentions is None:
+        warnings.append(f"{where}.mentions: {raw['mentions']!r} is not true or false; mentions are off for this rule.")
+        mentions = False
+    if unknown and "mentions" not in raw:  # one of them may be the opt-out, misspelt
+        warnings.append(f"{where}: unknown keys {', '.join(unknown)} ignored. Mentions are off for this rule until "
+                        "it states mentions: true or false.")
+        mentions = False
+    elif unknown:
         warnings.append(f"{where}: unknown keys {', '.join(unknown)} ignored.")
-    mentions = raw.get("mentions", True)
-    if not isinstance(mentions, bool):
-        warnings.append(f"{where}.mentions: {mentions!r} is not true or false; using true.")
-        mentions = True
     flows = raw.get("flows") or []
     if not isinstance(flows, list) or not all(isinstance(f, str) and f for f in flows):
         warnings.append(f"{where}.flows: must be a list of flow names; ignored.")
@@ -212,11 +256,14 @@ def load_settings(get_setting: SettingGetter, here: Optional[Callable[[], str]] 
         except Exception:
             old = None
         if old is not None:
-            w.append(f"{key} no longer applies and is ignored: Hermes sees what its Forgejo account sees, and the "
-                     "sidebar counts Waiting for me. You can remove it from the settings.")
+            w.append(f"{key} no longer applies and is ignored. Hermes sees what Hermes' account sees, and the "
+                     "sidebar counts Waiting for me. You can remove it from Hermes' settings.")
 
     url = str(raw("url") or "").strip().rstrip("/")
-    if url and not url.startswith(("https://", "http://")):
+    if "@" in url.split("://", 1)[-1].split("/", 1)[0]:  # never echoed: the part before the @ may be a password
+        w.append("url: the address holds a user name or password; ignored. Enter it without them.")
+        url = ""
+    elif url and not url.startswith(("https://", "http://")):
         w.append(f"url: {url!r} must start with https://; ignored.")
         url = ""
 
@@ -230,7 +277,7 @@ def load_settings(get_setting: SettingGetter, here: Optional[Callable[[], str]] 
         poll = int(poll_raw)
         if isinstance(poll_raw, bool):
             raise ValueError
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         w.append(f"poll_interval: {poll_raw!r} is not a number of seconds; using {DEFAULTS['poll_interval']}.")
         poll = DEFAULTS["poll_interval"]
     if not POLL_MIN <= poll <= POLL_MAX:
@@ -246,10 +293,26 @@ def load_settings(get_setting: SettingGetter, here: Optional[Callable[[], str]] 
         authors_raw = []
 
     rules_raw = raw("writes")
+    if isinstance(rules_raw, str):  # a `hermes config set` can store the list as its JSON text
+        try:
+            rules_raw = json.loads(rules_raw) if rules_raw.strip() else []
+        except ValueError:
+            pass
+    if isinstance(rules_raw, dict):  # one rule, written without the list around it
+        rules_raw = [rules_raw]
+    # A rule that cannot be read may be the one that switched mentions off somewhere, and nobody can tell
+    # where. So from that rule on they are off: in every later rule and in every repo no rule names.
+    mentions_elsewhere = True
     if not isinstance(rules_raw, list):
-        w.append("writes: must be a list of rules; using none (mentions on, no flows).")
-        rules_raw = []
-    rules = tuple(r for r in (_parse_rule(i, x, w) for i, x in enumerate(rules_raw)) if r is not None)
+        w.append("writes: must be a list of rules. Until it is one, no rule applies and mentions are off in every repo.")
+        rules_raw, mentions_elsewhere = [], False
+    rules = []
+    for i, x in enumerate(rules_raw):
+        rule = _parse_rule(i, x, w)
+        if rule is None:
+            mentions_elsewhere = False
+        else:
+            rules.append(rule if mentions_elsewhere else replace(rule, mentions=False))
 
     flows_path = str(raw("flows_path") or DEFAULTS["flows_path"]).strip()
     if flows_path.startswith("/") or ".." in flows_path.split("/"):
@@ -265,11 +328,11 @@ def load_settings(get_setting: SettingGetter, here: Optional[Callable[[], str]] 
     return Settings(
         url=url, you=you, poll_interval=poll,
         mention_authors=tuple(a.strip().lstrip("@") for a in authors_raw if a.strip()),
-        writes=rules, flows_path=flows_path,
+        writes=tuple(rules), flows_path=flows_path,
         audit_enabled=_as_bool("audit_enabled", raw("audit_enabled"), w),
         learn_mode=_as_bool("learn_mode", raw("learn_mode"), w),
         default_review_profile=profile,
         dry_run=_as_bool("dry_run", raw("dry_run"), w),
         review_every_pr=_as_bool("review_every_pr", raw("review_every_pr"), w),
-        warnings=tuple(w),
+        warnings=tuple(w), mentions_elsewhere=mentions_elsewhere,
     )

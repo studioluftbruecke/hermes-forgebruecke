@@ -5,7 +5,8 @@ Git runs ``hermes -p <profile> forgebruecke git-credential get`` and writes the 
 (``protocol=https``, ``host=forge.example``, one ``key=value`` per line, a blank line at the end).
 ``answer`` replies with ``username=`` and ``password=`` only when the request names the configured
 forge (same scheme, same host and port) and the agent token is set. Every other request gets no
-reply, so git asks its next helper. The personal write token is never handed out.
+reply, so git asks its next helper. The personal write token is never handed out. A request whose keys
+or values hold a control or separator character gets no reply either, because only ``\n`` ends a line.
 
 Shapes:
 
@@ -16,6 +17,7 @@ Shapes:
 from __future__ import annotations
 
 import shlex
+import unicodedata
 import urllib.parse
 from dataclasses import dataclass
 from typing import Mapping, Optional
@@ -49,7 +51,8 @@ def forge_origin(url: str) -> Optional[Origin]:
 
 def parse_request(text: str) -> dict:
     request: dict = {}
-    for line in (text or "").splitlines():
+    # splitlines() would also break at U+2028 and others, which git passes through inside a value.
+    for line in (text or "").split("\n"):
         if not line:
             break
         key, sep, value = line.partition("=")
@@ -58,10 +61,16 @@ def parse_request(text: str) -> dict:
     return request
 
 
+def _has_control_or_separator(text: str) -> bool:
+    return any(unicodedata.category(ch) in ("Cc", "Zl", "Zp") for ch in text)
+
+
 def answer(request: Mapping[str, str], forge_url: str, token: Optional[str]) -> str:
     """The reply to one ``get``: the agent token for the configured forge, else nothing."""
     origin, token = forge_origin(forge_url), (token or "").strip()
     if origin is None or not token:
+        return ""
+    if any(_has_control_or_separator(part) for item in request.items() for part in item):
         return ""
     if request.get("protocol", "").lower() != origin.scheme:
         return ""
@@ -75,7 +84,7 @@ def setup_text(forge_url: str, profile: str, hermes: str) -> str:
     """How to point git at this helper, with this profile and this host's ``hermes`` filled in."""
     origin = forge_origin(forge_url)
     if origin is None:
-        return ("Set the Forgejo address in Forgebrücke's settings first; git needs it to know which "
+        return ("Set the Forgejo address in Hermes' settings first; git needs it to know which "
                 "requests this helper answers.\n")
     key = shlex.quote(f"credential.{origin.scheme}://{origin.host}.helper")
     # Git sends `store` to every helper after each success; starting Hermes for a no-op costs seconds.
@@ -85,13 +94,13 @@ def setup_text(forge_url: str, profile: str, hermes: str) -> str:
              f"git config --global --add {key} {shlex.quote(CACHE_HELPER)}",
              f"git config --global --add {key} {ours}"]
     return "\n".join([
-        f"Git can push and pull at {origin.scheme}://{origin.host} as Hermes' Forgejo account, with the "
-        f"agent account token of the profile {profile}. Run these three lines in the shell whose git "
+        f"Git can push and pull at {origin.scheme}://{origin.host} as Hermes' account, with Hermes' token of "
+        f"the profile {profile}. Run these three lines in the shell whose git "
         "should use it (they write that shell's ~/.gitconfig):",
         "",
         *(f"  {line}" for line in lines),
         "",
-        "The empty helper line makes Forgebrücke the only helper for this forge; other hosts keep "
+        "The empty helper line makes Forgebrücke the only helper for this Forgejo; other hosts keep "
         "theirs. The cache keeps the answer in memory for an hour, so git does not start Hermes on "
         "every push. For one clone that several profiles share, run the same lines with "
         "`git -C <clone> config --local` in place of `git config --global`.",

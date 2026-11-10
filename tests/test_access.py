@@ -133,7 +133,7 @@ def test_write_on_a_read_only_repo_is_refused_with_the_right_and_the_collaborati
     with pytest.raises(access_mod.Refusal) as e:
         a.check_write(READ_ONLY, "write")
     link = f"{BASE}/{READ_ONLY}/settings/collaboration"
-    assert e.value.code == "read_only" and "Forgejo right: read" in e.value.message and link in e.value.message
+    assert e.value.code == "read_only" and "has read access there" in e.value.message and link in e.value.message
     assert e.value.to_dict()["link"] == link
     assert a.check_read(READ_ONLY) == "read"  # reading it is fine
     assert not [c for c in f.calls if c[0] != "GET"]
@@ -144,7 +144,7 @@ def test_a_repo_the_agent_cannot_see_is_refused_for_reads_and_writes_alike():
     for check in (a.check_read, a.check_write):
         with pytest.raises(access_mod.Refusal) as e:
             check("acme/secret")
-        assert e.value.code == "no_access" and "Forgejo right: none" in e.value.message
+        assert e.value.code == "no_access" and "cannot see acme/secret" in e.value.message
         assert f"{BASE}/acme/secret/settings/collaboration" in e.value.message
 
 
@@ -177,11 +177,49 @@ def test_another_access_for_the_same_token_shares_the_cache_and_clear_rights_for
     assert sum(1 for c in f.calls if c[1] == f"/api/v1/repos/{DEMO}") == 2
 
 
+def test_a_repo_shared_after_a_refusal_is_seen_on_the_next_call():
+    a, f = access()
+    assert a.right("acme/new") is None
+    f.accounts[BOT]["repos"].append(repo("acme/new", "write"))
+    assert a.right("acme/new") == "write"
+
+
+def test_a_caller_cannot_change_the_cached_repo_list():
+    a, _ = access()
+    listed = a.repos()
+    first = listed[0]["repo"]
+    listed[0]["right"] = "none"
+    listed.clear()
+    again = a.repos()
+    assert again[0]["repo"] == first and again[0]["right"] == "write"
+
+
 def test_you_is_suggested_from_the_owners_of_the_agents_repos():
     counts = access_mod.owner_counts([{"owner": "acme"}, {"owner": "acme"}, {"owner": "forgebruecke-bot"},
                                       {"owner": "forgebruecke-bot"}, {"owner": "forgebruecke-bot"}, {"owner": "x"}])
     assert access_mod.suggest_you(counts, "forgebruecke-bot") == "acme"
     assert access_mod.suggest_you({"forgebruecke-bot": 3}, "forgebruecke-bot") == ""
+
+
+def test_you_is_not_suggested_from_a_login_the_caller_rules_out():
+    counts = {"acme-org": 5, "dana": 2, "forgebruecke-bot": 9}
+    assert access_mod.suggest_you(counts, "forgebruecke-bot") == "acme-org"
+    assert access_mod.suggest_you(counts, "forgebruecke-bot", skip=("ACME-Org",)) == "dana"
+    assert access_mod.suggest_you(counts, "forgebruecke-bot", skip=["acme-org", "dana"]) == ""
+
+
+@pytest.mark.parametrize("value", ["../..", "acme/..", "./repo", "acme/.", "../user.git"])
+def test_a_dot_segment_is_not_a_repository_name(value):
+    with pytest.raises(access_mod.Refusal) as e:
+        access_mod.parse_repo(value)
+    assert e.value.code == "bad_repo"
+    assert access_mod.thread_repo(f"{value}#1") == ""
+
+
+def test_dots_inside_a_repository_name_are_fine():
+    assert access_mod.parse_repo("acme/.github") == "acme/.github"
+    assert access_mod.parse_repo("a.b/c..d.git") == "a.b/c..d"
+    assert access_mod.thread_repo("acme/.github#4") == "acme/.github"
 
 
 def read_handler(tool, lane, chat_id=""):
@@ -200,7 +238,7 @@ def test_a_mention_turn_asking_for_another_repo_is_refused_before_any_request():
     assert out["error"] == "lane_scope" and f"may read only {DEMO}, not {OTHER}" in out["message"]
     assert f.calls == []
     out = json.loads(h({"kind": "issue", "repo": DEMO, "number": 1}))
-    assert out["ok"] and out["read_as"] == "bot" and token_used(f) == "bot"
+    assert out["ok"] and token_used(f) == "bot"
 
 
 def test_a_mention_turn_cannot_search_across_repos():
@@ -223,10 +261,22 @@ def test_a_mention_reference_to_another_repo_does_not_expand():
     assert reference.completions("x", lambda k, d=None: values.get(k, d), env.get, transport=f, lane_fn=run.lane) == []
 
 
+def test_a_mention_lane_without_a_thread_repo_may_touch_no_repo():
+    a, f = access()
+    mention = a.for_lane("mention")
+    for check in (mention.check_scope, mention.check_read, mention.check_write):
+        with pytest.raises(access_mod.Refusal) as e:
+            check(DEMO)
+        assert e.value.code == "lane_scope" and "reads nothing" in e.value.message
+    assert f.calls == []
+    a.for_lane("mention", DEMO).check_scope(DEMO)
+    a.for_lane("flow").check_scope(DEMO)  # the engine builds its lane once and names the repo per call
+
+
 def test_user_chat_reads_use_the_agent_token():
     h, f = read_handler("forge_get", "agent")
     out = json.loads(h({"kind": "repo", "repo": DEMO}))
-    assert out["ok"] and out["read_as"] == "bot" and token_used(f) == "bot"
+    assert out["ok"] and token_used(f) == "bot"
 
 
 # --- the registry ------------------------------------------------------------------------------
@@ -252,7 +302,7 @@ def test_registry_per_setup_agent_only_and_owner():
     assert "FORGEBRUECKE_PERSONAL_WRITE_TOKEN" in status(agent_only, "owner_merge")["reason"]
     assert status(agent_only, "owner_merge")["light_with"] == ["owner"]
     assert status(agent_only, "protection_view")["status"] == "dark"
-    assert "admin right of Hermes' Forgejo account" in status(agent_only, "protection_view")["reason"]
+    assert "Hermes' account as an admin of the repo" in status(agent_only, "protection_view")["reason"]
     with_owner = run_doctor({"FORGEBRUECKE_BOT_ACCOUNT_TOKEN": BOT, "FORGEBRUECKE_PERSONAL_WRITE_TOKEN": OWNER})
     assert status(with_owner, "owner_merge")["status"] == "available"
     assert status(with_owner, "owner_merge")["uses"] == ["owner"]
@@ -266,15 +316,15 @@ def test_admin_features_light_where_the_agent_account_is_admin_and_say_where():
     report = run_doctor({"FORGEBRUECKE_BOT_ACCOUNT_TOKEN": BOT}, f=forge(bot_admin_on=("forgebruecke-bot/probe",)))
     for fid in ("protection_view", "presets"):
         assert status(report, fid)["status"] == "available"
-        assert "forgebruecke-bot/probe" in status(report, fid)["reason"] and "dark on the others" in status(report, fid)["reason"]
+        assert "forgebruecke-bot/probe" in status(report, fid)["reason"] and "not available on the others" in status(report, fid)["reason"]
 
 
 def test_setups_report_lists_scopes_and_what_each_lights():
     setups = {s["id"]: s for s in caps_mod.setups_report()}
     assert set(setups) == {"agent_only", "agent_owner"}
     assert setups["agent_only"]["mint"] == {"FORGEBRUECKE_BOT_ACCOUNT_TOKEN": list(caps_mod.BOT_SCOPES)}
-    assert "Merge button in the desk (with your account)" not in setups["agent_only"]["lights"]
-    assert "Merge button in the desk (with your account)" in setups["agent_owner"]["lights"]
+    assert "Merge button" not in setups["agent_only"]["lights"]
+    assert "Merge button" in setups["agent_owner"]["lights"]
     assert "could merge into main as you" in setups["agent_owner"]["summary"]
 
 
@@ -287,9 +337,9 @@ def test_a_token_of_the_wrong_account_is_flagged_and_ignored():
 def test_the_doctor_suggests_you_and_asks_for_it():
     report = run_doctor({"FORGEBRUECKE_BOT_ACCOUNT_TOKEN": BOT})
     assert report["you"] == {"set": "", "suggestion": "acme"}
-    assert report["ok"] and "setting you, probably acme" in report["next_step"]
+    assert report["ok"] and 'Click "Use @acme" on the Forgebrücke page.' in report["next_step"]
     report = run_doctor({"FORGEBRUECKE_BOT_ACCOUNT_TOKEN": BOT}, values={"url": BASE, "you": "acme"})
-    assert "setting you" not in report["next_step"]
+    assert "Use @" not in report["next_step"]
 
 
 def test_dark_sentence_names_the_field():

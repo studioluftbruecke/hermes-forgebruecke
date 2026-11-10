@@ -1,4 +1,6 @@
 """M10: lesson cards in learn mode, riding on the receipts hook."""
+import threading
+
 import pytest
 
 from fb_fakes import BASE, DEMO, HEAD_SHA, FakeForgejo, bot_account, make_token, sample_data, sub
@@ -29,7 +31,7 @@ def test_a_failed_check_answer_gets_the_lesson_once(tmp_path):
 
 def test_a_verified_pr_claim_gets_the_receipt_then_the_first_pr_lesson(tmp_path):
     out = hook(tmp_path)(response_text=f"I opened PR #3 in {DEMO}.")
-    assert out.index("Receipts, re-read from the forge:") < out.index("**Learn: your first pull request.**")
+    assert out.index("Receipts, re-read from Forgejo:") < out.index("**Learn: your first pull request.**")
     assert "✓ opened PR #3" in out
 
 
@@ -51,3 +53,37 @@ def test_an_unverified_claim_triggers_no_lesson(tmp_path):
                                         ("The review gate on PR #7 failed (three attempts).", True)])
 def test_failed_check_trigger(text, fires):
     assert ("first_failed_check" in lessons.triggers(text, [])) is fires
+
+
+def together(*calls):
+    """Run the calls on threads that start at the same moment; return what each returned or raised."""
+    barrier, results = threading.Barrier(len(calls)), [None] * len(calls)
+
+    def run(i, call):
+        barrier.wait()
+        try:
+            results[i] = call()
+        except Exception as e:
+            results[i] = e
+    threads = [threading.Thread(target=run, args=(i, call)) for i, call in enumerate(calls)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return results
+
+
+def test_two_answers_that_finish_together_both_keep_their_mark(tmp_path):
+    for i in range(100):
+        folder = tmp_path / str(i)
+        results = together(*(lambda user=user: lessons.LessonStore(folder).mark(user, "first_pr")
+                             for user in ("telegram:1", "telegram:2")))
+        assert not [r for r in results if isinstance(r, Exception)]
+        assert lessons.LessonStore(folder).shown() == {"telegram:1": ["first_pr"], "telegram:2": ["first_pr"]}
+
+
+def test_two_answers_for_one_user_show_the_card_once(tmp_path):
+    for i in range(50):
+        store = lessons.LessonStore(tmp_path / str(i))
+        cards = together(*(lambda: lessons.pick("the tests failed", [], store, "local:owner") for _ in range(2)))
+        assert len([c for c in cards if c]) == 1 and None in cards

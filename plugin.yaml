@@ -1,6 +1,6 @@
 name: forgebruecke
-version: "0.0.17"
-description: "Forgebrücke: a bridge between Hermes and your self-hosted Forgejo (or Gitea). Hermes works as its own Forgejo account, and that account's right on each repo (read or write, set in Forgejo) is the only permission layer. Read issues, pull requests, branches, releases and commits, list what waits across repos, and pull any issue or PR into a chat with @forgejo:owner/repo#123. Writes are each approved by you and refused in unattended runs; nothing ever approves or merges main. Every open pull request asks you to review it: Hermes asks on the ones it opens, and its background check asks on every other one that does not yet, however it was opened. Receipts re-read every pushed, opened or merged claim from the forge. Flows run agent reviews and checks and stop at you. A desk in Hermes Desktop shows the pull requests that wait for you. Repos: packs, protection presets, a read-only audit, import from GitHub, push mirrors, templates. Mention Hermes' account in a thread and it answers there. Learn mode teaches Git in plain words. forgejo_doctor explains your setup."
+version: "0.0.19"
+description: "A bridge between Hermes and your self-hosted Forgejo. Hermes works as its own account, you approve each write, and a desk shows the pull requests that wait for you."
 author: "Studio Luftbrücke"
 license: MIT
 requires_hermes: ">=0.23.0"
@@ -21,64 +21,64 @@ config_schema:
   url:
     type: string
     label: "Forgejo address"
-    description: "Step 1. The address you open your Forgejo at, for example https://forgejo.example.com"
+    description: "The address you open your Forgejo at, for example https://forgejo.example.com."
   token:
     type: secret
     env: FORGEBRUECKE_BOT_ACCOUNT_TOKEN
-    label: "Agent account token"
-    description: "Step 2, required. The Forgejo account Hermes works as (for example a user named hermes). In each repo Hermes should see, add that account under Settings, Collaborators, with Read or Write: that right is the only permission layer, Hermes reads where it may read and writes only where it may write. Signed in as that account, open Settings, Applications and generate a token for all repositories with read:notification, write:issue, write:repository, read:user."
+    label: "Hermes' account token"
+    description: "A token of Hermes' account, created for all repositories with read:notification, write:issue, write:repository and read:user."
   you:
     type: string
     default: ""
     label: "Your Forgejo login"
-    description: "Step 3. Your own user name on Forgejo. The desk's Waiting for me lists the open pull requests that request your review, and every pull request Hermes opens asks you to review it. The settings page suggests the owner of the repos Hermes sees."
+    description: "Your own user name on Forgejo, so the desk lists the pull requests that wait for your review."
   owner_token:
     type: secret
     env: FORGEBRUECKE_PERSONAL_WRITE_TOKEN
     label: "Your write token (optional)"
-    description: "Optional, empty by default. A token of your own account with write:repository and read:user. It only lights the desk's Merge button, merging as you on your click; agent tools, mention answers and flows never use it. Every agent shell on the Hermes host can read this token and could merge into main as you. Leave it empty unless you accept that; you can always merge in Forgejo."
+    description: "A token of your own account for the desk's Merge button; any agent shell on this host can read it and could merge into main as you."
   poll_interval:
     type: integer
     default: 120
-    label: "Check the forge every (seconds)"
-    description: "How often mentions and flows are checked, 30 to 3600 seconds."
+    label: "Check Forgejo every (seconds)"
+    description: "How often mentions and flows are checked, from 30 to 3600 seconds."
   mention_authors:
     type: list
     default: []
     label: "Who may mention Hermes"
-    description: "Hermes answers a mention only when its author has write access to the repo, never its own comments. Name users here to narrow that further; empty means everyone with write access."
+    description: "Users whose mentions Hermes answers; empty means everyone with write access to the repo."
   writes:
     type: list
     default: []
-    label: "Per-repo rules"
-    description: "Optional, one rule per repo or pattern: {repo_glob: owner/repo, flows: [], mentions: true, targets: []}. flows lists the flows that run there; mentions false stops mention answers there (on by default); targets lists the branches a pull request may target (empty: the default branch). Rules grant no access: that is the agent account's right in Forgejo."
+    label: "Flows and mentions per repo"
+    description: "One rule per repo: which flows run there and whether Hermes answers mentions; a rule grants no access."
   flows_path:
     type: string
     default: ".forgebruecke/flows.yml"
     label: "Flow file in each repo"
-    description: "Where a repository keeps its flow definition."
+    description: "The path of the flow file inside each repository."
   audit_enabled:
     type: boolean
     default: false
     label: "Security audit"
-    description: "A read-only check of branch protection, required checks, deploy keys and public repos. Off by default. The checks that need admin run only where Hermes' account is admin."
+    description: "A read-only check of branch protection, required checks, deploy keys and public repos."
   learn_mode:
     type: boolean
     default: false
     label: "Learn mode"
-    description: "A short lesson card after your first pull request, your first failed check and your first merge, once per person."
+    description: "A short Git lesson after your first pull request, your first failed check and your first merge."
   default_review_profile:
     type: string
     default: ""
     label: "Profile that runs agent reviews"
-    description: "Empty: the profile Forgebrücke runs in. Or any other Hermes profile you already have. A flow's review gate uses it when the flow names none, and the templates fill it in. The desk can also create a separate reviewer profile, only if you click it."
+    description: "The Hermes profile a flow's review gate uses when the flow names none; empty means this profile."
   review_every_pr:
     type: boolean
     default: true
-    label: "Ask me on every pull request"
-    description: "On by default. Every open pull request should ask you to review it. With this on, the background check (every poll interval) asks you on each open pull request that does not ask you yet, in every repo where Hermes' account has write access, however the pull request was opened. It skips the ones you opened and the ones you already reviewed. The desk lists such a pull request even before it asks you, marked review not requested yet. This write runs unattended, without an approval card; dry run applies. Off: only the pull requests Hermes opens with forgejo_create_pr ask you."
+    label: "Ask me to review every pull request"
+    description: "Hermes asks you to review every open pull request where it may write, without an approval card."
   dry_run:
     type: boolean
     default: true
-    label: "Dry run"
-    description: "When on, writes to the forge are previewed and not sent."
+    label: "Preview only (Hermes writes nothing)"
+    description: "Hermes shows each comment, pull request and check it would send, and sends none."

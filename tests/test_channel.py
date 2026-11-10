@@ -2,6 +2,7 @@
 import pytest
 
 from fb_fakes import BASE, DEMO, FakeForgejo, bot_account, make_token, sample_data, sub
+from fb_fakes_workers import Faulty, paged_notifications
 
 poller = sub("channel.poller")
 profile = sub("profile")
@@ -35,9 +36,17 @@ def kit(rules=None, authors=None, comments=None, bot=None, perms=None):
     return forge, client, settings, ledger
 
 
-def find(client, settings, ledger, now=T0 + 60, log=None):
+def read(client, settings, ledger, now=T0 + 60, log=None):
     return poller.find_mentions(client, bot="forgebruecke-bot", settings=settings, ledger=ledger, now=now,
                                 log=log or (lambda e, d: None))
+
+
+def find(client, settings, ledger, now=T0 + 60, log=None):
+    """One poll whose mentions were all delivered: the adapter marks a mention after it handed it to Hermes."""
+    found = read(client, settings, ledger, now, log)
+    for m in found:
+        ledger.mark(m.key, m.thread, now)
+    return found
 
 
 def test_a_mention_is_found_once_and_the_ledger_dedupes_the_next_poll():
@@ -45,9 +54,117 @@ def test_a_mention_is_found_once_and_the_ledger_dedupes_the_next_poll():
                                                             "2026-11-08T13:00:20Z")])
     first = find(client, settings, ledger)
     assert [(m.key, m.author, m.thread) for m in first] == [(f"{DEMO}#1/c900", "hermes", f"{DEMO}#1")]
-    assert ledger.since == poller.iso(T0 + 60)
+    assert ledger.since == "2026-11-08T13:00:30Z"  # the newest stamp the forge showed, not the host's clock
     assert find(client, settings, ledger, now=T0 + 120) == []  # same notification, same comment
     assert find(client, settings, ledger, now=T0 + 180) == []
+
+
+def test_a_found_mention_comes_back_until_the_caller_marks_it_delivered():
+    forge, client, settings, ledger = kit(comments=[comment(900, "hermes", "@forgebruecke-bot what fails?",
+                                                            "2026-11-08T13:00:20Z")])
+    assert [m.comment_id for m in read(client, settings, ledger)] == [900]
+    assert not ledger.was_answered(f"{DEMO}#1/c900")
+    again = read(client, settings, ledger, now=T0 + 90)
+    assert [m.comment_id for m in again] == [900]
+    ledger.mark(again[0].key, again[0].thread, T0 + 90)
+    assert read(client, settings, ledger, now=T0 + 120) == []
+
+
+def test_a_forge_error_in_a_later_thread_loses_no_mention_of_an_earlier_one():
+    forge, client, settings, ledger = kit(comments=[comment(900, "hermes", "@forgebruecke-bot what fails?",
+                                                            "2026-11-08T13:00:20Z")])
+    forge.data[DEMO]["issues"][2] = {**forge.data[DEMO]["issues"][1], "number": 2, "title": "second thread"}
+    forge.data[DEMO]["comments"][2] = [comment(901, "hermes", "@forgebruecke-bot and here?", "2026-11-08T13:00:25Z")]
+    forge.notifications = [thread(1), thread(2)]
+    transport = Faulty(forge)
+    # the client's own retries all fail, then the forge is healthy again
+    transport.fail(lambda m, p: m == "GET" and p.endswith("/issues/2"), times=client_mod.RETRIES + 1)
+    client = client_mod.ForgejoClient(BASE, BOT, transport=transport, sleep=lambda s: None, clock=lambda: 0.0)
+    with pytest.raises(client_mod.ForgejoError):
+        find(client, settings, ledger)
+    assert ledger.since == "2026-11-08T13:00:00Z" and ledger.answered == {}
+    assert [m.comment_id for m in find(client, settings, ledger, now=T0 + 120)] == [900, 901]
+
+
+def test_a_host_clock_ahead_of_the_forge_loses_no_mention():
+    forge, client, settings, ledger = kit()
+    forge.notifications = []
+    assert find(client, settings, ledger, now=T0 + 300) == []  # the host says 13:05, the forge 13:00
+    forge.data[DEMO]["comments"][1] = [comment(950, "hermes", "@forgebruecke-bot late clock", "2026-11-08T13:00:20Z")]
+    forge.notifications = [thread(at="2026-11-08T13:00:20Z")]
+    assert [m.comment_id for m in find(client, settings, ledger, now=T0 + 360)] == [950]
+    assert ledger.since == "2026-11-08T13:00:20Z"
+
+
+def thread_reads(forge):
+    return sum(1 for c in forge.calls if c[1].endswith("/issues/1/comments"))
+
+
+def test_the_overlap_is_read_again_for_two_minutes_and_then_only_what_is_newer():
+    forge, client, settings, ledger = kit(comments=[comment(900, "hermes", "@forgebruecke-bot one",
+                                                            "2026-11-08T13:00:20Z")])
+    assert [m.comment_id for m in find(client, settings, ledger)] == [900]
+    # a comment the forge stamped before the cursor and showed late is still found inside the overlap
+    forge.data[DEMO]["comments"][1].append(comment(901, "hermes", "@forgebruecke-bot two", "2026-11-08T13:00:25Z"))
+    assert [m.comment_id for m in find(client, settings, ledger, now=T0 + 90)] == [901]
+    before = thread_reads(forge)
+    assert find(client, settings, ledger, now=T0 + 60 + poller.OVERLAP_S) == []
+    assert find(client, settings, ledger, now=T0 + 3600) == []
+    assert thread_reads(forge) == before  # an idle forge costs one notifications read per poll, no thread reads
+    forge.data[DEMO]["comments"][1].append(comment(902, "hermes", "@forgebruecke-bot three", "2026-11-08T13:40:00Z"))
+    forge.notifications = [thread(at="2026-11-08T13:40:00Z")]
+    assert [m.comment_id for m in find(client, settings, ledger, now=T0 + 3660)] == [902]
+
+
+def test_a_ledger_written_before_the_cursor_knew_its_age_keeps_working(tmp_path):
+    forge, client, settings, _ = kit(comments=[comment(900, "hermes", "@forgebruecke-bot one", "2026-11-08T13:00:20Z")])
+    (tmp_path / "l.json").write_text('{"since": "2026-11-08T13:00:00Z", "answered": {}, "replies": {}}')
+    ledger = poller.Ledger.load(tmp_path / "l.json")
+    assert [m.comment_id for m in find(client, settings, ledger)] == [900]
+    ledger.save(tmp_path / "l.json")
+    assert poller.Ledger.load(tmp_path / "l.json").to_dict() == ledger.to_dict()
+
+
+def many_threads(count):
+    """A forge where issues 101.. each carry one mention, and a client that sees notifications paged."""
+    forge, _, settings, ledger = kit()
+    issue = forge.data[DEMO]["issues"][1]
+    for n in range(101, 101 + count):
+        forge.data[DEMO]["issues"][n] = {**issue, "number": n}
+        forge.data[DEMO]["comments"][n] = [comment(n * 10, "hermes", "@forgebruecke-bot hi", "2026-11-08T13:00:20Z")]
+    forge.notifications = [thread(n) for n in range(101, 101 + count)]
+    client = client_mod.ForgejoClient(BASE, BOT, transport=paged_notifications(forge), sleep=lambda s: None,
+                                      clock=lambda: 0.0)
+    return forge, client, settings, ledger
+
+
+def test_more_threads_than_one_page_are_all_read():
+    forge, client, settings, ledger = many_threads(60)
+    assert sorted(m.number for m in find(client, settings, ledger)) == list(range(101, 161))
+
+
+def test_more_comments_than_one_page_in_a_thread_are_all_read():
+    cs = [comment(1000 + i, "hermes", "@forgebruecke-bot here" if i == 55 else "no mention", "2026-11-08T13:00:20Z")
+          for i in range(60)]
+    forge, client, settings, ledger = kit(comments=cs)
+    assert [m.comment_id for m in find(client, settings, ledger)] == [1055]
+
+
+def test_a_poll_over_the_cap_reads_the_newest_threads_and_says_what_it_left(monkeypatch):
+    monkeypatch.setattr(poller, "MAX_THREADS", 50)
+    forge, client, settings, ledger = many_threads(60)
+    forge.notifications[0]["updated_at"] = "2026-11-08T13:00:10Z"  # thread 101 is the oldest
+    skipped = []
+    found = find(client, settings, ledger, log=lambda e, d: skipped.append(d))
+    assert len(found) == 50 and 101 not in {m.number for m in found}
+    assert len(skipped) == 1 and "more than 50 threads" in skipped[0]["reason"]
+
+
+def test_a_thread_the_forge_lists_twice_in_one_poll_is_read_once():
+    forge, client, settings, ledger = kit(comments=[comment(900, "hermes", "@forgebruecke-bot hi",
+                                                            "2026-11-08T13:00:20Z")])
+    forge.notifications = [thread(), thread()]
+    assert [m.comment_id for m in find(client, settings, ledger)] == [900]
 
 
 def test_two_mentions_in_one_thread_share_the_chat_id_one_session_per_thread():
@@ -73,9 +190,10 @@ def test_loop_guard_three_answers_per_thread_per_hour():
     skipped = []
     found = find(client, settings, ledger, log=lambda e, d: skipped.append(d))
     assert len(found) == 3 and len([s for s in skipped if "last hour" in s["reason"]]) == 2
-    # The next poll still sees them in its overlap and still refuses; once the cursor has moved past
-    # them they are dropped, not queued (a guard, not a backlog).
-    assert find(client, settings, ledger, now=T0 + 180) == []
+    # The next poll still sees them in its overlap and still refuses; once the overlap has run out
+    # they are dropped, not queued (a guard, not a backlog).
+    assert find(client, settings, ledger, now=T0 + 120, log=lambda e, d: skipped.append(d)) == []
+    assert len([s for s in skipped if "last hour" in s["reason"]]) == 4
     assert find(client, settings, ledger, now=T0 + 3700) == []
     assert ledger.rate_ok(f"{DEMO}#1", T0 + 60 + 3601)
 
@@ -226,7 +344,7 @@ def test_editing_the_profile_config_asks_first(tmp_path):
     g = guard(home=tmp_path)
     d = g(tool_name="patch", args={"path": str(tmp_path / "config.yaml"), "old_string": "a", "new_string": "b"})
     assert d["action"] == "approve" and "guardrails" in d["message"]
-    assert d["rule_key"] == "forgebruecke:settings:patch"
+    assert d["rule_key"].startswith("forgebruecke:settings:patch:")
     assert g(tool_name="write_file", args={"path": str(tmp_path / "notes.md"), "content": "x"}) is None
     assert g(tool_name="write_file", args={"path": str(tmp_path / ".env"), "content": "x"})["action"] == "approve"
 
@@ -301,3 +419,11 @@ def test_unattended_and_mention_turns_cannot_touch_the_settings():
 def test_mention_turns_cannot_write_through_tools():
     reason = approval.RunContext(platform="forgebruecke").unattended_reason()
     assert reason and "Forgejo mention" in reason
+
+
+def test_channel_blockers_commands_name_the_profile():
+    # A bare `hermes config set` in the user's shell writes the default profile, not the one that runs the plugin.
+    blockers = profile.channel_blockers(cfg(platform=False, toolsets=None), profile_name="coding")
+    assert "hermes -p coding config set platforms.forgebruecke" in blockers[0]
+    assert "hermes -p coding config set platform_toolsets.forgebruecke" in blockers[1]
+    assert "hermes config set platforms" in profile.channel_blockers(cfg(platform=False))[0]  # name unknown

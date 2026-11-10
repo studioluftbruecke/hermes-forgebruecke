@@ -103,7 +103,8 @@ def test_an_import_that_outlives_the_timeout_is_polled_not_called_nothing_change
             assert timeout == repos.MIGRATE_TIMEOUT_S
             real(method, url, headers, body, timeout)  # the forge finishes the import...
             raise sub("client").ForgejoError(None, "timeout", "The forge did not answer in time (timed out). The "
-                                             "write may still have landed: check before you repeat it.")  # ...late
+                                             "write may still have landed: check before you repeat it.",
+                                             may_have_landed=True)  # ...late
         return real(method, url, headers, body, timeout)
     monkeypatch.setattr(repos, "_sleep", lambda s: None)
     _, out = approved_run(slow, {"action": "import", "source": GH})
@@ -125,7 +126,8 @@ def test_a_write_timeout_never_claims_nothing_changed():
                 client.urllib_transport(method, "https://forge.example.test/api/v1/x", {}, None, 1)
             except client.ForgejoError as e:
                 assert e.kind == kind
-                assert ("nothing was changed" in e.message) == (method == "GET")
+                assert "nothing was changed" not in e.message
+                assert ("may have landed" in e.message) == (method == "POST")
     finally:
         urllib.request.urlopen = orig
 

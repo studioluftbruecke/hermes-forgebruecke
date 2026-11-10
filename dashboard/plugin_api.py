@@ -1,11 +1,14 @@
 """Backend routes for the Forgebrücke desk, mounted at `/api/plugins/forgebruecke/`.
 
     GET  /desk[?refresh=true]         rows (one per open PR with a flow), counts, repo cards; 15 s cache
-    GET  /settings[?refresh=true]     the three key fields (set or not, whose account, scopes), the
+    GET  /settings[?refresh=true]     the two key fields (set or not, whose account, scopes), the
                                       capability registry's features, the setups, the profiles; 60 s cache
     POST /merge                       {repo, number, head_sha}: the merge button, with the write token of
                                       your account, only when the registry says it can merge
-    POST /reviewer-profile            the N20 fallback: create `forgebruecke-reviewer` (or the command)
+    POST /setting                     {key, value}: the settings page's switches and "Use this login". Saves
+                                      one of you, dry_run, review_every_pr, learn_mode, audit_enabled to the
+                                      profile's plugin settings; never a token
+    POST /reviewer-profile            create `forgebruecke-reviewer` (or the command)
 
 The handlers are `desk.py`'s `api_*` functions; this file only adapts them to FastAPI. Hermes loads it
 as a standalone module, so the plugin folder is loaded here as a package by path. Settings come from
@@ -103,6 +106,22 @@ def settings(refresh: bool = Query(False)) -> JSONResponse:
 @router.post("/merge")
 def merge(body: dict = Body(...)) -> JSONResponse:
     return _reply(_desk().api_merge(_get_setting, _get_secret, body, data_dir=_data_dir()))
+
+
+@router.post("/setting")
+def setting(body: dict = Body(...)) -> JSONResponse:
+    try:
+        from hermes_cli.plugins_state import save_plugin_setting
+    except ImportError:
+        return JSONResponse({"ok": False, "error": "not_supported",
+                             "message": "This Hermes cannot save a setting from a page. Set it in Hermes' settings."},
+                            status_code=501)
+
+    def save(key: str, value: Any) -> None:
+        save_plugin_setting(PLUGIN, (key,), value)
+
+    return _reply(_desk().api_set_setting(body, save=save, get_setting=_get_setting, get_secret=_get_secret,
+                                          data_dir=_data_dir()))
 
 
 @router.post("/reviewer-profile")

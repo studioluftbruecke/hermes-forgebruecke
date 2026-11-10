@@ -3,15 +3,16 @@
 Layout under the plugin's ``data_dir`` (``ctx.state.data_dir``; never built by hand):
 
     flows/prs/<owner>__<repo>/<pr>.json     the PR's flow state (shape below)
-    flows/overrides/<flow>.yml              per-profile flow files (D10: they win over the repo file)
+    flows/overrides/<flow>.yml              per-profile flow files (they win over the repo file)
     flows/control.json                      {"paused": ["<flow>", "<flow>@<owner/repo>", ...]}
     flows/engine.json                       the last tick: when, from where, what it did, errors
     flows/.lock                             fcntl lock: one tick at a time, across processes
     runs/<flow>/<owner>__<repo>-<pr>-<sha12>-<gate>.json   a review worker's verdict file
     runs/<flow>/<...>.prompt.md / .log      the worker's prompt and output
 
-PR state: ``{repo, pr, flow, flow_version, head_sha, title, url, author, base, updated_at, closed,
-merged, status_comment_id, status_comment_hash, notified[], history[], gates[GateRun]}``.
+PR state: ``{repo, pr, flow, flow_version, gate_hashes[], head_sha, title, url, author, base, head_ref,
+updated_at, closed, merged, status_comment_id, status_comment_hash, notified[], history[], rounds{},
+gates[GateRun]}``. ``flow_version`` and ``gate_hashes`` say which definition of the flow the gates ran under.
 
 Two ticks never run at once (the gateway loop, a cron ``hermes forgebruecke tick`` and a
 ``forgejo_flows action=run`` can overlap): ``tick_lock()`` takes the lock without waiting and the
@@ -57,6 +58,10 @@ class Busy(Exception):
     """Another tick holds the lock."""
 
 
+class Unreadable(Exception):
+    """A pull request's state file exists and is not a state. The message says which file and what to do."""
+
+
 class FlowStore:
     def __init__(self, data_dir: Any) -> None:
         if not data_dir:
@@ -93,13 +98,22 @@ class FlowStore:
     def pr_path(self, repo: str, pr: int) -> Path:
         return self._inside(self.prs_dir / repo_slug(repo) / f"{int(pr)}.json")
 
-    def load_pr(self, repo: str, pr: int) -> Optional[dict]:
+    def load_pr(self, repo: str, pr: int, *, strict: bool = False) -> Optional[dict]:
+        """The stored state, or None when there is none. A file that does not parse also reads as None,
+        unless ``strict``: the engine must not take a damaged file for a pull request it never saw."""
+        path = self.pr_path(repo, pr)
         try:
-            return json.loads(self.pr_path(repo, pr).read_text(encoding="utf-8"))
+            state = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(state, dict) and isinstance(state.get("gates"), list):
+                return state
         except FileNotFoundError:
             return None
         except (OSError, json.JSONDecodeError):
-            return None
+            pass
+        if strict:
+            raise Unreadable("its state file does not parse, so it was skipped. "
+                             f"Delete flows/prs/{path.parent.name}/{path.name} to start its gates over.")
+        return None
 
     def save_pr(self, state: dict) -> None:
         state["updated_at"] = int(time.time())

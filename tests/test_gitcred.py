@@ -44,6 +44,20 @@ def test_a_non_default_port_in_the_address_must_match():
     assert run_cli("get", "protocol=https\nhost=forge.example\n\n", url="https://forge.example:443/")[1]
 
 
+def test_a_unicode_line_separator_inside_a_value_is_no_line_break():
+    for separator in ("\u2028", "\u2029", "\x85", "\x0b", "\x0c", "\x1c", "\r"):
+        request = f"protocol=https\nhost=evil.example\nusername=x{separator}host=forge.example\n\n"
+        assert run_cli("get", request) == (0, ""), repr(separator)
+
+
+def test_a_control_character_in_any_value_means_no_answer():
+    for request in ("protocol=https\nhost=forge.example\nusername=a\tb\n\n",
+                    "protocol=https\nhost=forge.example\nusername=a\x00b\n\n",
+                    "protocol=https\nhost=forge.example\npath=a\u2028b\n\n",
+                    "protocol=https\r\nhost=forge.example\r\n\r\n"):
+        assert run_cli("get", request) == (0, ""), repr(request)
+
+
 def test_no_token_or_no_address_means_no_answer():
     assert run_cli("get", "protocol=https\nhost=forge.example\n\n", secrets={}) == (0, "")
     assert run_cli("get", "protocol=https\nhost=forge.example\n\n", url="") == (0, "")
@@ -68,6 +82,6 @@ def test_setup_text_asks_for_the_address_first():
 
 
 def test_setup_text_starts_hermes_only_for_get():
-    text = gitcred.setup_text(URL, "coding", "/opt/hermes/bin/hermes")
-    assert ("""'!f() { if [ "$1" = get ]; then exec /opt/hermes/bin/hermes -p coding forgebruecke """
+    text = gitcred.setup_text(URL, "coding", "/usr/local/bin/hermes")
+    assert ("""'!f() { if [ "$1" = get ]; then exec /usr/local/bin/hermes -p coding forgebruecke """
             """git-credential get; fi; }; f'""") in text

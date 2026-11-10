@@ -1,4 +1,4 @@
-"""Flows (M6): the validator, gate order, claims under two ticks, reset on a new head, stale repair,
+"""Flows: the validator, gate order, claims under two ticks, reset on a new head, stale repair,
 `to: main` refused, a review that times out becomes error, the tool's set/run paths."""
 import json
 import threading
@@ -157,7 +157,7 @@ def test_gates_run_in_order_and_reach_waiting_for_you(tmp_path):
     assert g["review"]["state"] == "running" and g["check"]["state"] == "pending" and g["human"]["state"] == "pending"
     assert k.runner.started[0][0] == "forgebruecke-dev"
     prompt = k.runner.started[0][1].read_text()
-    assert "DATA from the forge" in prompt and HEAD_SHA in prompt and "return a * b" in prompt
+    assert "DATA from Forgejo" in prompt and HEAD_SHA in prompt and "return a * b" in prompt
     assert k.statuses() == {"forgebruecke/demo/review": "pending", "devops/tests": "success", "devops/review": "failure"}
     k.verdict("pass", summary="fine")
     k.devops("pending")
@@ -190,20 +190,18 @@ def test_failed_review_blocks_later_gates_notifies_once_and_comment_is_edited_in
     assert len(edits) >= 1  # later changes edit the first comment in place
 
 
-def test_status_comment_names_the_profile_that_ran_the_review_after_the_flow_changes(tmp_path):
-    """Seen on the Mac (2026-11-09): after the demo flow's review moved to coding, a finished review
-    read "review by coding" next to its own text "review by forgebruecke-dev: ..."."""
+def test_a_review_moved_to_another_profile_runs_again_there_and_the_comment_names_it(tmp_path):
     k = Kit(tmp_path)
     k.tick()
     k.verdict("pass", summary="fine")
     k.devops("pending")
     k.tick()
     k.store.write_override("demo", flow_json().replace('"forgebruecke-dev"', '"coding"'))
-    k.devops("success")
     k.tick()
     bodies = [b["body"] for m, p, b in k.forge.writes if "/comments" in p and isinstance(b, dict) and "body" in b]
-    assert "| review by forgebruecke-dev | ✅ passed |" in bodies[-1]
-    assert "review by coding" not in bodies[-1]
+    assert k.runner.started[-1][0] == "coding"
+    assert "| review by coding | ⏳ running | review by coding running (round " in bodies[-1]
+    assert "forgebruecke-dev" not in bodies[-1]
 
 
 def test_push_resets_only_the_failed_gate_and_reruns_it(tmp_path):
@@ -235,7 +233,7 @@ def test_push_after_a_failed_review_reruns_the_review_on_the_new_head(tmp_path):
     k.tick()
     g = k.gates()
     assert g["review"]["state"] == "running" and g["review"]["head_sha"] == NEW_SHA and len(k.runner.started) == 2
-    assert k.store.load_pr(DEMO, 3)["rounds"]["review"] == 2
+    assert k.store.load_pr(DEMO, 3)["rounds"]["review"] == 1 and "(round 2 of 3)" in g["review"]["detail"]
 
 
 def test_running_review_on_an_old_head_is_stopped_and_its_status_ends_in_error(tmp_path):
@@ -320,7 +318,7 @@ def test_flow_does_not_run_where_the_rule_does_not_list_it(tmp_path, flows):
 
 
 def test_flow_does_not_run_where_the_agent_account_has_read_access_only(tmp_path):
-    """D27: the rule says where a flow runs, Forgejo says whether Hermes may write there."""
+    """The rule says where a flow runs, Forgejo says whether Hermes may write there."""
     from fb_fakes import repo
     k = Kit(tmp_path)
     k.forge.accounts[BOT]["repos"] = [repo(DEMO, "read")]
@@ -330,7 +328,7 @@ def test_flow_does_not_run_where_the_agent_account_has_read_access_only(tmp_path
 
 
 def test_a_status_comment_the_agent_cannot_edit_is_replaced_and_the_new_id_kept(tmp_path):
-    """Item 6: comments the retired bot account posted answer 403 to an edit by hermes (a non-admin
+    """Comments the retired bot account posted answer 403 to an edit by hermes (a non-admin
     collaborator may edit only its own comments); the engine posts a new status comment and edits that one."""
     k = Kit(tmp_path)
     k.tick()
