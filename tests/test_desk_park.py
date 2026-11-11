@@ -54,11 +54,11 @@ def by_id(body):
 def test_a_parked_row_leaves_the_count_and_the_label(tmp_path):
     f = forge(4)
     before = build(tmp_path, f)
-    assert before["counts"] == {"waiting": 2, "parked": 0, "running": 0, "blocked": 0} and before["label"] == "Forgejo · 2"
+    assert before["counts"] == {"waiting": 2, "parked": 0, "running": 0, "blocked": 0} and before["label"] == "Forgebrücke · 2"
     park(tmp_path, 3, note="after staging")
     body = build(tmp_path, f)
     rows = by_id(body)
-    assert body["counts"] == {"waiting": 1, "parked": 1, "running": 0, "blocked": 0} and body["label"] == "Forgejo · 1"
+    assert body["counts"] == {"waiting": 1, "parked": 1, "running": 0, "blocked": 0} and body["label"] == "Forgebrücke · 1"
     assert rows[3]["section"] == "parked" and rows[3]["back"] is None and rows[4]["section"] == "now"
     assert rows[3]["parked"] == {"note": "after staging", "parked_at": NOW - 3600, "wake_commits": True,
                                  "seen": {"head_sha": HEAD_SHA, "comment_at": "2026-11-08T12:00:00Z", "draft": False},
@@ -69,7 +69,7 @@ def test_a_parked_row_leaves_the_count_and_the_label(tmp_path):
 def test_all_rows_parked_gives_zero_and_the_bare_label(tmp_path):
     park(tmp_path, 3)
     body = build(tmp_path, forge())
-    assert body["counts"]["waiting"] == 0 and body["counts"]["parked"] == 1 and body["label"] == "Forgejo"
+    assert body["counts"]["waiting"] == 0 and body["counts"]["parked"] == 1 and body["label"] == "Forgebrücke"
 
 
 @pytest.mark.parametrize("reason,setup", [

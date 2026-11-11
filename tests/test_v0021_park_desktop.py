@@ -16,15 +16,18 @@ SDK_0020 = {"atom", "Badge", "Button", "Codicon", "ConfirmDialog", "DisclosureCa
             "DropdownMenuContent", "DropdownMenuItem", "DropdownMenuTrigger", "EmptyState", "ErrorState", "host",
             "PALETTE_AREA", "ROUTES_AREA", "SearchField", "SegmentedControl", "SIDEBAR_NAV_AREA", "Skeleton", "Tip",
             "ToggleRow", "useQuery", "useQueryClient", "useValue"}
+# 0.0.22 adds Switch and Input for the shared sidebar-row module's settings block. Desktop 0.23.0, which the README
+# names as the oldest it needs, exports both (apps/desktop/src/sdk/index.ts); Coolifybrücke imports them too.
+SDK_0022 = SDK_0020 | {"Input", "Switch"}
 
 
 def part(start, end):
     return SOURCE[SOURCE.index(start):SOURCE.index(end, SOURCE.index(start))]
 
 
-def test_no_new_sdk_import_so_any_desktop_that_loads_0_0_20_loads_it():
+def test_no_sdk_import_beyond_switch_and_input_so_any_desktop_0_23_loads_it():
     block = re.search(r"^import \{(.*?)\} from '@hermes/plugin-sdk'", SOURCE, re.S | re.M).group(1)
-    assert {n.strip() for n in block.split(",") if n.strip()} == SDK_0020
+    assert {n.strip() for n in block.split(",") if n.strip()} == SDK_0022
     assert "import { Component, useEffect, useRef, useState } from 'react'" in SOURCE  # useRef from react
     assert not re.search(r"(?<![\w.])fetch\(", SOURCE)  # no direct network call; refetch() is the query's
 
@@ -79,7 +82,7 @@ def test_the_desk_moves_a_row_before_the_refetch():
                     for name in ("formatNavLabel", "seenOf", "withParked"))
     rows = [{"id": "a#1", "tab": "waiting", "section": "now"}, {"id": "a#2", "tab": "waiting", "section": "now"},
             {"id": "a#3", "tab": "running", "section": "now"}]
-    data = {"rows": rows, "counts": {"waiting": 2, "parked": 0, "running": 1, "blocked": 0}, "label": "Forgejo · 2"}
+    data = {"rows": rows, "counts": {"waiting": 2, "parked": 0, "running": 1, "blocked": 0}, "label": "Forgebrücke · 2"}
     script = fns + f"""
 const d = {json.dumps(data)}
 const p = withParked(d, 'a#1', {{ note: 'n' }})
@@ -90,6 +93,6 @@ process.stdout.write(JSON.stringify([p.counts, p.label, p.rows[0].section, u.cou
     out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
     assert json.loads(out.stdout) == [
-        {"waiting": 1, "parked": 1, "running": 1, "blocked": 0}, "Forgejo · 1", "parked",
-        {"waiting": 2, "parked": 0, "running": 1, "blocked": 0}, "Forgejo · 2", None, True,
+        {"waiting": 1, "parked": 1, "running": 1, "blocked": 0}, "Forgebrücke · 1", "parked",
+        {"waiting": 2, "parked": 0, "running": 1, "blocked": 0}, "Forgebrücke · 2", None, True,
         {"head_sha": "ab", "comment_at": "t", "draft": False}, {"head_sha": "", "comment_at": None, "draft": None}]

@@ -92,10 +92,12 @@ def _mod(name: str):
 
 
 def nav_label(waiting: int) -> str:
-    """The sidebar row's label: the count of pull requests waiting for the user."""
+    """The sidebar row's label: the brand, plus the count of pull requests waiting for the user (D1 of the
+    sidebar-rows plan). Desktop 0.0.22 and newer compose the row from `counts.waiting` the same way, so this
+    string is for older Desktop halves and the desk answer's readers."""
     if waiting <= 0:
-        return "Forgejo"
-    return f"Forgejo · {waiting if waiting < 100 else '99+'}"
+        return "Forgebrücke"
+    return f"Forgebrücke · {waiting if waiting < 100 else '99+'}"
 
 
 def segment(state: str) -> str:

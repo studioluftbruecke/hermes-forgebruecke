@@ -1,4 +1,4 @@
-// Forgebrücke: the Desktop half. A sidebar row "Forgejo · N" (N = pull requests waiting for you), a desk
+// Forgebrücke: the Desktop half. A sidebar row "Forgebrücke · N" (N = pull requests waiting for you), a desk
 // page (/forgebruecke) with four tabs (Waiting for me, Running, Blocked, Repos), a palette command and a
 // settings page: one next action, four setup rows, four switches and what the setup can do.
 //
@@ -25,12 +25,14 @@ import {
   EmptyState,
   ErrorState,
   host,
+  Input,
   PALETTE_AREA,
   ROUTES_AREA,
   SearchField,
   SegmentedControl,
   SIDEBAR_NAV_AREA,
   Skeleton,
+  Switch,
   Tip,
   ToggleRow,
   useQuery,
@@ -43,17 +45,18 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 const ID = 'forgebruecke'
 // The same string as plugin.yaml (tests/test_settings.py holds them equal). The routes answer Hermes' version,
 // so the pages can say when this half is older or newer.
-export const VERSION = '0.0.21'
+export const VERSION = '0.0.22'
 const PATH = '/forgebruecke'
 const TAG = '[' + ID + ']'
 const NAV_POLL_MS = 60000
 const DESK_POLL_MS = 30000
 const SETTINGS_HREF = '/settings?tab=plugins&agent=forgebruecke'
-const CHAT_TITLE = 'Forgejo'
+const CHAT_TITLE = 'Forgebrücke'
 const FILTER_ABOVE = 8
 
 let pluginCtx = null
-let navLabel = null
+// The sidebar row (the shared module below), kept here so the settings page can draw its Sidebar section.
+let sidebarRow = null
 
 function log(step, value) {
   try {
@@ -105,12 +108,153 @@ const SHEET = [
   '.fb-repo:hover{background:' + T.fill + '}'
 ].join('\n')
 
-// The label rule is the backend's (desk.nav_label); this copy only runs before the first answer.
+// The desk answer's label after a park, before the refetch: the backend's rule (desk.nav_label). The sidebar row
+// does not read it; it shows sidebarRowLabel('Forgebrücke', counts.waiting), the same text.
 export function formatNavLabel(waiting) {
   const n = Number(waiting) || 0
-  if (n <= 0) return 'Forgejo'
-  return 'Forgejo · ' + (n < 100 ? String(n) : '99+')
+  if (n <= 0) return 'Forgebrücke'
+  return 'Forgebrücke · ' + (n < 100 ? String(n) : '99+')
 }
+
+// The sidebar row's count: the desk answer's counts.waiting, never its label, so a backend older than 0.0.22
+// that still answers "Forgejo · 3" draws "Forgebrücke · 3". An answer without counts (a refusal) gives null
+// and the row keeps its last label.
+export function waitingOf(desk) {
+  const counts = desk && desk.counts
+  if (!counts || counts.waiting === null || counts.waiting === undefined || counts.waiting === '') return null
+  const n = Number(counts.waiting)
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null
+}
+
+function showCount(desk) {
+  const n = waitingOf(desk)
+  if (sidebarRow && n !== null) sidebarRow.setCount(n)
+}
+
+// sidebar-row v1 begin
+// The plugin's sidebar row: its brand as the label (plus an optional count), a show switch and a
+// position, kept per Desktop in ctx.storage under 'sidebar' as { show, position }. One source:
+// templates/plugin-skeleton/desktop/sidebar-row.js. Every copy (desktop/src/sidebar-row.js in a
+// built plugin, the marked block in a single-file desktop/plugin.js) must equal it between these
+// markers; tests/test_sidebar_row.py fails one that differs. Change the template, then copy it.
+// Import-free: the plugin passes the SDK names in `sdk`:
+//   { SIDEBAR_NAV_AREA, Switch, Input, jsx, jsxs, atom, useValue }
+const SIDEBAR_ROW_KEY = 'sidebar'
+const SIDEBAR_ROW_MIN = 1
+const SIDEBAR_ROW_MAX = 99
+
+/** An integer from 1 to 99, or `fallback` when `value` is not a number. */
+function sidebarRowPosition(value, fallback) {
+  if (value === null || value === undefined || value === '') return fallback
+  const n = Math.round(Number(value))
+  if (!Number.isFinite(n)) return fallback
+  return Math.min(SIDEBAR_ROW_MAX, Math.max(SIDEBAR_ROW_MIN, n))
+}
+
+/** The row's label: the brand, plus " · N" while N is above 0 ("99+" from 100). */
+function sidebarRowLabel(brand, count) {
+  const n = Math.floor(Number(count) || 0)
+  return n > 0 ? `${brand} · ${n < 100 ? n : '99+'}` : brand
+}
+
+/** Register the row from this Desktop's stored choice (nothing stored: shown, at defaultPosition).
+ *  No backend read, so the row paints in its place with the first frame. Every change disposes the
+ *  held contribution before it registers again: Desktop's registry replaces an entry by id, and an
+ *  older disposer would then remove the new entry. */
+function startSidebarRow(ctx, { brand, path, codicon, defaultPosition, sdk }) {
+  const store = ctx.storage || { get: (key, fallback) => fallback, set: () => {} }
+  const fallback = sidebarRowPosition(defaultPosition, 50)
+  const stored = store.get(SIDEBAR_ROW_KEY, null)
+  const saved = stored && typeof stored === 'object' ? stored : {}
+  const $prefs = sdk.atom({ show: saved.show !== false, position: sidebarRowPosition(saved.position, fallback) })
+  let count = 0
+  let disposeRow = null
+  let stopped = false
+
+  const drop = () => {
+    const dispose = disposeRow
+    disposeRow = null
+    if (dispose) dispose()
+  }
+  const apply = () => {
+    drop()
+    const { show, position } = $prefs.get()
+    if (stopped || !show) return
+    disposeRow = ctx.register({ id: 'nav', area: sdk.SIDEBAR_NAV_AREA, order: position, data: { codicon, label: sidebarRowLabel(brand, count), path } })
+  }
+  apply()
+
+  return {
+    brand,
+    $prefs,
+    prefs: () => $prefs.get(),
+    /** A new count relabels a shown row; a hidden row stays hidden and shows the count when shown. */
+    setCount(n) {
+      const next = Math.max(0, Math.floor(Number(n) || 0))
+      const relabel = sidebarRowLabel(brand, next) !== sidebarRowLabel(brand, count)
+      count = next
+      if (relabel && $prefs.get().show) apply()
+    },
+    /** Store { show, position } (either may be left out), then show, hide or move the row at once. */
+    setPrefs(patch) {
+      const now = $prefs.get()
+      const p = patch && typeof patch === 'object' ? patch : {}
+      const next = {
+        show: 'show' in p ? p.show !== false : now.show,
+        position: sidebarRowPosition(p.position, now.position),
+      }
+      if (next.show === now.show && next.position === now.position) return now
+      store.set(SIDEBAR_ROW_KEY, next)
+      $prefs.set(next)
+      apply()
+      return next
+    },
+    /** Remove the row for good (the plugin's own unload runs Desktop's disposers anyway). */
+    dispose() {
+      stopped = true
+      drop()
+    },
+  }
+}
+
+/** The "Sidebar" block of the plugin's settings page: SDK Switch and Input, nothing else. */
+function SidebarSection({ row, sdk }) {
+  const { jsx, Switch, Input } = sdk
+  const jsxs = sdk.jsxs || sdk.jsx
+  const prefs = sdk.useValue(row.$prefs)
+  const line = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, minHeight: 32 }
+  const note = { margin: 0, fontSize: '0.75rem', color: 'var(--ui-text-secondary)' }
+  const commit = event => {
+    const next = row.setPrefs({ position: event.target.value })
+    event.target.value = String(next.position)
+  }
+  return jsxs('section', {
+    'data-sidebar-section': row.brand,
+    style: { display: 'grid', gap: 6, margin: '12px 0', padding: '10px 12px', border: '1px solid var(--ui-stroke-tertiary)', borderRadius: 8 },
+    children: [
+      jsx('h3', { style: { margin: 0, fontSize: '0.8125rem', fontWeight: 600 }, children: 'Sidebar' }, 'title'),
+      jsxs('div', { style: line, children: [
+        jsx('span', { children: 'Show in the sidebar' }),
+        jsx(Switch, { checked: prefs.show, 'aria-label': 'Show in the sidebar', onCheckedChange: on => row.setPrefs({ show: on }) }),
+      ] }, 'show'),
+      jsxs('div', { style: line, children: [
+        jsx('span', { children: 'Position' }),
+        jsx(Input, {
+          type: 'number', min: SIDEBAR_ROW_MIN, max: SIDEBAR_ROW_MAX, step: 1, inputMode: 'numeric',
+          'aria-label': 'Position', defaultValue: String(prefs.position), style: { width: 72 },
+          onBlur: commit,
+          onKeyDown: event => { if (event.key === 'Enter') commit(event) },
+        }, String(prefs.position)),
+      ] }, 'position'),
+      jsx('p', { style: note, children: 'Lower numbers sit higher. Kanban is 50.' }, 'hint'),
+      prefs.show ? null : jsx('p', { style: note, children: `Open it from the command palette: Open ${row.brand}.` }, 'hidden'),
+    ],
+  })
+}
+// sidebar-row v1 end
+
+// Every SDK name the shared module uses, passed in because the block imports nothing.
+const SIDEBAR_SDK = { SIDEBAR_NAV_AREA, Switch, Input, jsx, jsxs, atom, useValue }
 
 // ── backend ──────────────────────────────────────────────────────────────────────────────────────
 
@@ -531,7 +675,7 @@ function useParking() {
     const next = withParked(client.getQueryData(key), id, parked)
     if (next) {
       client.setQueryData(key, next)
-      if (next.label) setNavLabel(next.label)
+      showCount(next)
     }
   }
   const refetch = () => client.invalidateQueries({ queryKey: key })
@@ -861,7 +1005,9 @@ function DeskBody() {
       setRefreshing(false)
     }
   }
-  if (data && data.label) setNavLabel(data.label)
+  useEffect(() => {
+    if (data) showCount(data)
+  }, [data])
   let body
   if (desk.isLoading) body = el(Loading, { text: 'Reading your pull requests.' })
   else if (desk.isError && notHere(desk.error)) body = el(Problem, { action: 'Open plugins', onAction: () => host.navigate('/settings?tab=plugins'), text: 'Switch it on under Settings, Plugins. Or open a chat of a profile that has it.', title: 'Forgebrücke is not on in this profile' })
@@ -1205,22 +1351,19 @@ function SettingsBody() {
       : null)
 }
 
+// The Sidebar section sits under the body and outside its guard: it needs no backend, so it shows while the
+// setup loads or fails too.
 function SettingsPage() {
-  return el(Guard, {}, el(SettingsBody, {}))
+  return el('div', null,
+    el(Guard, {}, el(SettingsBody, {})),
+    sidebarRow ? el(Guard, {}, el('div', { style: { padding: '0 20px 20px' }, 'data-test': 'sidebar' }, jsx(SidebarSection, { row: sidebarRow, sdk: SIDEBAR_SDK }))) : null)
 }
 
 // ── registration ─────────────────────────────────────────────────────────────────────────────────
 
-function setNavLabel(label) {
-  if (!pluginCtx || !label || label === navLabel) return
-  navLabel = label
-  pluginCtx.register({ id: 'nav', area: SIDEBAR_NAV_AREA, order: 56, data: { codicon: 'repo-forked', label, path: PATH } })
-}
-
 async function pollNav() {
   try {
-    const desk = await rest('/desk')
-    if (desk && desk.label) setNavLabel(desk.label)
+    showCount(await rest('/desk'))
   } catch {
     /* the row keeps its last label; the page shows the error */
   }
@@ -1241,10 +1384,9 @@ export default {
   description: 'Your Forgejo pull requests and what waits for you.',
   register(ctx) {
     pluginCtx = ctx
-    navLabel = null
     addSheet(ctx)
     ctx.register({ id: 'page', area: ROUTES_AREA, data: { path: PATH }, render: () => jsx(DeskPage, {}) })
-    setNavLabel(formatNavLabel(0))
+    sidebarRow = startSidebarRow(ctx, { brand: 'Forgebrücke', path: PATH, codicon: 'repo-forked', defaultPosition: 55, sdk: SIDEBAR_SDK })
     ctx.register({
       id: 'open',
       area: PALETTE_AREA,

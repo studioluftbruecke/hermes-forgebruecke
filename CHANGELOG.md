@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.0.22
+
+- The sidebar row says Forgebrücke, with the number of pull requests waiting for you: "Forgebrücke · 3" (was
+  "Forgejo · 3"). Desktop takes the number from the desk's counts, so the row shows the new name with an older
+  Hermes too.
+- The chat tab that Ask Hermes opens is called Forgebrücke (was Forgejo).
+- A Sidebar section at the end of the settings page: Show in the sidebar, and Position (lower numbers sit higher;
+  Kanban is 50). Both are kept on this Desktop. The row now sits at 55, below Kanban with the other Studio
+  Luftbrücke plugins (was 56). A hidden row's desk opens from the command palette: Open Forgebrücke.
+
 ## 0.0.21
 
 - Forgejo is checked every 30 seconds by default (was 120).

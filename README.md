@@ -6,7 +6,7 @@ account on its own feature branches, and the merge into `main` stays yours.
 
 ![The Forgejo desk in Hermes Desktop](docs/screenshot-1.png)
 
-Version 0.0.21. MIT. A Studio Luftbrücke Hermes plugin.
+Version 0.0.22. MIT. A Studio Luftbrücke Hermes plugin.
 
 ## What it does
 
@@ -32,6 +32,8 @@ hermes plugins install https://github.com/studioluftbruecke/hermes-forgebruecke
 ```
 
 Then start a new chat. Update with `hermes plugins update forgebruecke` in the same places.
+
+- The sidebar switch and position on the Forgebrücke settings page are kept per Desktop, so a second computer starts with the defaults.
 
 ## Hermes on a server
 

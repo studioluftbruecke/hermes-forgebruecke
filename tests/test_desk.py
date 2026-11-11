@@ -58,8 +58,8 @@ def getters(tokens=("bot",), you="", **extra):
     return (lambda k, d=None: values.get(k, d)), secrets.get
 
 
-@pytest.mark.parametrize("n,label", [(0, "Forgejo"), (3, "Forgejo · 3"), (99, "Forgejo · 99"),
-                                     (100, "Forgejo · 99+"), (250, "Forgejo · 99+")])
+@pytest.mark.parametrize("n,label", [(0, "Forgebrücke"), (3, "Forgebrücke · 3"), (99, "Forgebrücke · 99"),
+                                     (100, "Forgebrücke · 99+"), (250, "Forgebrücke · 99+")])
 def test_nav_label(n, label):
     assert desk.nav_label(n) == label
 
@@ -101,7 +101,7 @@ def test_desk_rows_counts_checks_and_last_comment(tmp_path):
     gs, sec = getters(you="acme")
     status, body = desk.api_desk(gs, sec, data_dir=tmp_path, transport=f, now=lambda: 1000)
     assert status == 200 and body["ok"]
-    assert body["label"] == "Forgejo · 1" and body["counts"] == {"waiting": 1, "parked": 0, "running": 0, "blocked": 1}
+    assert body["label"] == "Forgebrücke · 1" and body["counts"] == {"waiting": 1, "parked": 0, "running": 0, "blocked": 1}
     first = body["rows"][0]
     assert first["number"] == 3 and first["tab"] == "waiting" and first["waiting_on"] == "acme"
     assert [g["segment"] for g in first["gates"]] == ["done", "done", "waiting"]
@@ -124,7 +124,7 @@ def test_without_you_the_desk_says_so_and_suggests_the_owner_of_the_agents_repos
     note = body["waiting_note"]
     assert note == {"message": "Which Forgejo user are you?", "suggestion": "acme", "source": "repo_owner",
                     "settings_href": desk.SETTINGS_HREF}
-    assert body["counts"]["waiting"] == 0 and body["label"] == "Forgejo" and body["you"] is None
+    assert body["counts"]["waiting"] == 0 and body["label"] == "Forgebrücke" and body["you"] is None
     assert not any(c[1].endswith("/repos/issues/search") for c in f.calls)
 
 
@@ -144,7 +144,7 @@ def test_waiting_for_me_lists_prs_that_request_your_review_without_a_flow(tmp_pa
     assert row["url"] == f"{BASE}/{DEMO}/pulls/3" and row["head_sha"] == HEAD_SHA and row["can_merge"] is False
     assert {s["context"] for s in row["checks"]["statuses"]} == {"devops/tests", "devops/review"}
     assert row["last_comment"]["author"] == "acme"
-    assert body["label"] == "Forgejo · 1" and body["counts"]["waiting"] == 1 and body["waiting_note"] is None
+    assert body["label"] == "Forgebrücke · 1" and body["counts"]["waiting"] == 1 and body["waiting_note"] is None
     assert body["repos"][0]["open_rows"] == 1  # the review row is not a flow row
     searches = [c for c in f.calls if c[1].endswith("/repos/issues/search")]
     pulls = [c for c in f.calls if c[1].endswith(f"/repos/{DEMO}/pulls")]
@@ -174,7 +174,7 @@ def test_every_open_pr_that_does_not_ask_you_yet_still_waits_for_you(tmp_path):
     assert sorted(rows) == [3, 8]
     assert rows[3]["reason"] == "review requested" and rows[8]["reason"] == "review not requested yet"
     assert rows[8]["tab"] == "waiting" and rows[8]["can_merge"] is False
-    assert body["counts"]["waiting"] == 2 and body["label"] == "Forgejo · 2"
+    assert body["counts"]["waiting"] == 2 and body["label"] == "Forgebrücke · 2"
     assert not any(w[0] != "GET" for w in f.writes)  # the desk only reads; the tick asks
 
 

@@ -123,7 +123,7 @@ def test_a_flow_row_that_waits_for_someone_else_is_not_under_waiting_for_me(tmp_
     body = read(tmp_path, forge(), pr_state(3, human="waiting for bob to merge in Forgejo"), tokens=BOTH)
     row = body["rows"][0]
     assert row["tab"] == "running" and body["counts"] == {"waiting": 0, "parked": 0, "running": 1, "blocked": 0}
-    assert body["label"] == "Forgejo"
+    assert body["label"] == "Forgebrücke"
     assert row["summary"] == {"tone": "wait", "text": "Every gate passed. Waiting for bob to merge."}
     assert row["waiting_on"] == "bob" and row["can_merge"] is False and row["next"] == "open_in_forgejo"
 

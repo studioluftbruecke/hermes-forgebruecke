@@ -23,9 +23,10 @@ def sentences():
             yield from (s for s in re.split(r"(?<=[.!?])\s+", text) if s)
 
 
-def test_the_readme_stays_under_1450_words():
-    # 1300 until the two-place section ("Hermes on a server", about 120 words) joined the README.
-    assert len(README.split()) < 1450, len(README.split())
+def test_the_readme_stays_under_1475_words():
+    # 1300 until the two-place section ("Hermes on a server", about 120 words) joined the README; 1450 until the
+    # sidebar line of 0.0.22 (23 words, worded by the sidebar-rows plan for every plugin).
+    assert len(README.split()) < 1475, len(README.split())
 
 
 def test_install_and_troubleshooting_are_there_and_at_most_six_lines_each():

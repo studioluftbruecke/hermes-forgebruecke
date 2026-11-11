@@ -42,7 +42,7 @@ def test_a_profile_without_forgebruecke_gets_a_sentence_not_a_bare_404():
 
 def test_registers_the_row_route_palette_and_settings_page():
     assert "const PATH = '/forgebruecke'" in SOURCE
-    assert "codicon: 'repo-forked'" in SOURCE and "SIDEBAR_NAV_AREA" in SOURCE
+    assert "codicon: 'repo-forked'" in SOURCE and "SIDEBAR_NAV_AREA" in SOURCE and "startSidebarRow(ctx, {" in SOURCE
     assert "registerSettingsPage" in SOURCE and "PALETTE_AREA" in SOURCE
     assert "ctx.setInterval" in SOURCE  # the count poll dies with the plugin
 
@@ -54,7 +54,7 @@ def test_hover_and_focus_styles_live_in_one_sheet_that_leaves_with_the_plugin():
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
-@pytest.mark.parametrize("n,label", [(0, "Forgejo"), (3, "Forgejo · 3"), (99, "Forgejo · 99"), (100, "Forgejo · 99+")])
+@pytest.mark.parametrize("n,label", [(0, "Forgebrücke"), (3, "Forgebrücke · 3"), (99, "Forgebrücke · 99"), (100, "Forgebrücke · 99+")])
 def test_the_pane_label_rule_matches_the_backend(n, label):
     fn = re.search(r"export function formatNavLabel\(waiting\) \{.*?\n\}", SOURCE, re.S).group(0)
     script = fn.replace("export ", "") + f"\nprocess.stdout.write(JSON.stringify(formatNavLabel({n})))"
@@ -91,7 +91,7 @@ def test_ask_hermes_drafts_a_reference_and_never_sends():
     assert "'@forgejo:' + row.repo + '#' + row.number + ' ' + sentence" in ask
     chat = part("async function openChat(text)", "const QUESTIONS")
     assert "tabTitle: CHAT_TITLE" in chat and "storage.get(storageKey, null)" in chat and "host.newChat" in chat
-    assert "const CHAT_TITLE = 'Forgejo'" in SOURCE
+    assert "const CHAT_TITLE = 'Forgebrücke'" in SOURCE  # D5 of the sidebar-rows plan (0.0.22)
     assert ".submit(" not in SOURCE and "session.send" not in SOURCE and "prompt.submit" not in SOURCE
 
 
@@ -160,8 +160,12 @@ def test_switches_save_through_the_setting_route_and_writing_asks_once():
 
 def test_the_pane_never_takes_a_token_itself():
     # Only Hermes' own form (All settings) writes a secret to .env; every token step links there.
-    sdk_imports = re.search(r"import \{([^}]*)\} from '@hermes/plugin-sdk'", SOURCE).group(1)
-    assert "Input" not in sdk_imports and "'password'" not in SOURCE and "<input" not in SOURCE
+    # Input arrives in 0.0.22 for the Sidebar section's Position field only: outside the shared module's block it
+    # is named in the import and handed to the module, nowhere else.
+    block = SOURCE[SOURCE.index("// sidebar-row v1 begin"):SOURCE.index("// sidebar-row v1 end")]
+    outside = SOURCE.replace(block, "")
+    assert len(re.findall(r"\bInput\b", outside)) == 2 and "SIDEBAR_SDK = { SIDEBAR_NAV_AREA, Switch, Input," in outside
+    assert "type: 'number'" in block and "'password'" not in SOURCE and "<input" not in SOURCE
     assert "const openFields = () => host.navigate(SETTINGS_HREF)" in SOURCE
     assert "const SETTINGS_HREF = '/settings?tab=plugins&agent=forgebruecke'" in SOURCE
 

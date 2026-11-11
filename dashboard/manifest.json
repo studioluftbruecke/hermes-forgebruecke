@@ -3,7 +3,7 @@
   "label": "Forgebrücke",
   "description": "Backend routes for the Forgebrücke desk: rows, gate states, counts, repo cards, settings, merge",
   "icon": "GitMerge",
-  "version": "0.0.21",
+  "version": "0.0.22",
   "tab": {
     "path": "/forgebruecke",
     "hidden": true
