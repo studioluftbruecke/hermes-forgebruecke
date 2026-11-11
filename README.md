@@ -4,42 +4,60 @@
 [Forgejo](https://forgejo.org). Gitea works where its API matches. Hermes works there as its own
 account, you approve what it writes, and the merge stays yours.
 
-## What you get
+![The Forgejo desk in Hermes Desktop](docs/screenshot-1.png)
 
-- **Desk** in Hermes Desktop, or `hermes forgebruecke desk` in a terminal. The pull requests that
-  wait for you, each with its state in one sentence.
-- **Chat.** Ask about issues, pull requests, checks and repos. `@forgejo:owner/repo#123` pulls one
-  into a message.
-- **Writes.** Comments, pull requests and checks, each shown to you first.
+Version 0.0.20. MIT. A Studio Luftbrücke Hermes plugin.
+
+## What it does
+
+- **Desk.** The pull requests that wait for you, each with its state in one sentence. In Hermes
+  Desktop, or `hermes forgebruecke desk` in a terminal.
+- **Chat and writes.** Ask about issues, pull requests, checks and repos. Comments, pull requests
+  and checks are shown to you first.
 - **Receipts.** "Pushed", "opened" or "merged" in a reply is checked against Forgejo and marked ✓ or ❌.
-- **Flows.** A small file per repo: agent review, checks, optional staging, then you.
-- **Mentions.** Mention Hermes' account in a thread and it answers there.
-- **Repos.** Access overview, starter pack, protection presets, audit, import, mirrors, templates.
-- **Learn mode.** Short Git lessons at your first pull request, failed check and merge.
+- **Flows and mentions.** Per repo: agent review, checks, optional staging, then you. Hermes
+  answers mentions of its account in the thread.
+- **Repos and lessons.** Access, presets, audit, import, mirrors, templates, and short Git lessons.
 
-## Install
+## Install and update
 
-Forgebrücke needs Hermes 0.23.0 or newer. On the machine that runs Hermes:
+Forgebrücke needs Hermes 0.23.0 or newer. Run the first line where Hermes runs. With Hermes on a
+server, run the second line on the Desktop computer too.
 
 ```bash
-hermes plugins install <repository URL>#plugins/forgebruecke
-hermes plugins enable forgebruecke
+hermes plugins install https://github.com/studioluftbruecke/hermes-forgebruecke --enable
+hermes plugins install https://github.com/studioluftbruecke/hermes-forgebruecke
 ```
 
-Then start a new chat.
+Then start a new chat. Update with `hermes plugins update forgebruecke` in the same places.
 
-## Setup
+## Hermes on a server
+
+Desktop draws the desk and settings from its own computer, so both places need the same version:
+
+- On the server, add `-p <profile>` to the install and update commands.
+- Then Capabilities → Plugins → Rescan; switch a new Desktop half on there.
+- Tokens and settings go into the server profile only (Desktop connected to the server, Settings →
+  Plugins → Forgebrücke). The Desktop computer's copy needs none.
+- After a server update, switch **Agent in <profile>** off and on there, then start a new chat.
+- The mention channel needs `hermes gateway restart` on the server; off and on is not enough.
+- Compare the Version column of `hermes plugins list` on both computers.
+
+## First use
 
 1. **A Forgejo account for Hermes.** Create a user, for example `hermes`. Add it to each repo under
    Settings → Collaborators. Signed in as that user, create a token for all repositories with
    `read:notification`, `write:issue`, `write:repository`, `read:user`.
-2. **Address and token.** In Hermes Desktop open Settings → Plugins → Forgebrücke. Enter your
-   Forgejo address and Hermes' token.
-3. **You.** Click "Use @your-name" on the Forgebrücke page, so the desk knows whose reviews to list.
-4. **Let Hermes write.** A new setup only previews writes. Switch on "Let Hermes write".
+2. **Address, token and you.** In Hermes Desktop open Settings → Plugins → Forgebrücke. Enter your
+   Forgejo address and Hermes' token. Then click "Use @your-name" on the Forgebrücke page, so the
+   desk knows whose reviews to list.
+3. **Let Hermes write.** A new setup only previews writes. Switch on "Let Hermes write". Then ask
+   "What waits for me on Forgejo?"
 
 The Forgebrücke page names the next step. `hermes forgebruecke doctor` prints the same check in a
 terminal.
+
+![Forgebrücke settings](docs/screenshot-4.png)
 
 Optional:
 
@@ -53,12 +71,6 @@ Optional:
   hermes -p <profile> config set platform_toolsets.forgebruecke '[forgebruecke]'
   hermes -p <profile> config set platforms.forgebruecke '{enabled: true}'
   ```
-
-## What you can ask
-
-- "What waits for me on Forgejo?"
-- "Summarise @forgejo:owner/repo#12 and tell me what to check before I merge."
-- "Set up a flow for owner/repo: one agent review, then me."
 
 ## Your rules
 
@@ -143,6 +155,15 @@ Optional:
   `receipts.jsonl`, `desk-actions.jsonl` and `lessons.json` live in your profile's plugin data folder.
 - **`@forgejo:` in any message expands**, including text you paste.
 - No telemetry, no hosted service.
+
+## Uninstall
+
+Run `hermes plugins remove forgebruecke` in every place you installed it. The tokens in the
+profile's `.env` and the plugin's data folder stay. Revoke the tokens in Forgejo.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

@@ -23,12 +23,13 @@ def sentences():
             yield from (s for s in re.split(r"(?<=[.!?])\s+", text) if s)
 
 
-def test_the_readme_stays_under_1300_words():
-    assert len(README.split()) < 1300, len(README.split())
+def test_the_readme_stays_under_1450_words():
+    # 1300 until the two-place section ("Hermes on a server", about 120 words) joined the README.
+    assert len(README.split()) < 1450, len(README.split())
 
 
 def test_install_and_troubleshooting_are_there_and_at_most_six_lines_each():
-    install, wrong = section("Install"), section("If something is wrong")
+    install, wrong = section("Install and update"), section("If something is wrong")
     assert 1 <= len(install) <= 6 and 1 <= len(wrong) <= 6, (len(install), len(wrong))
     assert any(line.startswith("hermes plugins install ") for line in install)
     assert any("hermes forgebruecke doctor" in line for line in wrong)

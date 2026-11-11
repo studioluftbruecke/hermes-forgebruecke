@@ -97,7 +97,7 @@ def test_a_rule_that_cannot_be_read_says_where_mentions_are_off_now():
 
 def test_url_and_paths_are_validated():
     s = settings.load_settings(getter({"url": "forge.example.test", "flows_path": "../etc/x",
-                                       "default_review_profile": "Dev Ops!"}))
+                                       "default_review_profile": "Dev Ops!"}), lambda: "")
     assert s.url == "" and s.flows_path == ".forgebruecke/flows.yml" and s.default_review_profile == ""
     assert len(s.warnings) == 3 and "using this profile" in s.warnings[2]
 
@@ -133,7 +133,7 @@ def test_a_broken_config_read_gives_defaults():
     def boom(key, default=None):
         raise RuntimeError("config backend down")
 
-    assert settings.load_settings(boom) == settings.Settings()
+    assert settings.load_settings(boom, lambda: "") == settings.Settings()
 
 
 def test_credentials_strip_and_never_print():
@@ -208,5 +208,5 @@ def test_the_manifest_drops_the_retired_fields_adds_you_and_says_the_write_token
     assert "any agent shell on this host can read it and could merge into main as you" in owner
     owner_row = next(t for t in sub("capabilities").TOKENS if t["role"] == "owner")
     assert "could merge into main as you" in owner_row["risk"]
-    assert re.search(r'^version: "0\.0\.19"$', manifest, re.M)
-    assert '"version": "0.0.19"' in (ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8")
+    assert re.search(r'^version: "0\.0\.20"$', manifest, re.M)
+    assert '"version": "0.0.20"' in (ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8")

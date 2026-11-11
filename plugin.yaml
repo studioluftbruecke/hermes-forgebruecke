@@ -1,5 +1,5 @@
 name: forgebruecke
-version: "0.0.19"
+version: "0.0.20"
 description: "A bridge between Hermes and your self-hosted Forgejo. Hermes works as its own account, you approve each write, and a desk shows the pull requests that wait for you."
 author: "Studio Luftbrücke"
 license: MIT

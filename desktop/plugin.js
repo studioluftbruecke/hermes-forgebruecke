@@ -12,6 +12,7 @@
 // react/jsx-runtime, theme variables only, no eval.
 
 import {
+  atom,
   Badge,
   Button,
   Codicon,
@@ -647,6 +648,22 @@ function DeskPage() {
 // itself, and what works. The two token fields are Hermes' own form (Open settings): only that form
 // writes a secret to the profile's .env.
 
+// Desktop loads this file from the computer it runs on, never from a remote Hermes, so an update on the
+// server leaves this half behind. host.state.connectionId is 'local' for this computer's own Hermes
+// (Desktop's LOCAL_CONNECTION_ID, never given to a remote source); any other value, null or a Desktop
+// without the field shows the line, because a missed update costs more than one line.
+const NO_CONNECTION = atom(null)
+const TWO_PLACE_TIP = 'No Hermes on this computer: Capabilities → Plugins → Install from Git with this plugin\'s repository, Force reinstall.'
+
+function TwoPlaceNote() {
+  const id = useValue((host.state && host.state.connectionId) || NO_CONNECTION)
+  if (id === 'local') return null
+  return el('div', { 'data-test': 'two-place', title: TWO_PLACE_TIP, style: { ...S.row(6), fontSize: '0.75rem', color: T.tertiary } },
+    el(Codicon, { name: 'info', size: '0.75rem' }),
+    el('span', null, 'Hermes on another computer? Update this plugin on both. Here: ',
+      el('code', null, 'hermes plugins update ' + ID), ', then Rescan.'))
+}
+
 const BADGE = { setup: ['warn', 'setup needed'], preview: ['outline', 'preview only'], ready: ['success', 'ready'], unchecked: ['warn', 'not checked'] }
 const STEP_ICON = { done: ['pass-filled', T.green], todo: ['circle-large-outline', T.accent], problem: ['error', T.red], unchecked: ['warning', T.yellow], optional: ['circle-large-outline', T.tertiary] }
 const WRITE_CONFIRM = 'Hermes will send comments, pull requests and checks. You approve each one in the chat; flows and review requests run on their own.'
@@ -859,6 +876,7 @@ function SettingsBody() {
     el(Features, { features: s.features || [] }),
     el(HowItWorks, { s, startOpen: s.state === 'setup' }),
     flows && flows.status === 'available' ? el(AgentReviews, { s }) : null,
+    el(TwoPlaceNote, {}),
     confirming
       ? el(ConfirmDialog, { confirmLabel: 'Let Hermes write', description: WRITE_CONFIRM, onClose: () => setConfirming(false), onConfirm: () => save('dry_run', false, true), open: true, title: 'Let Hermes write?' })
       : null)
