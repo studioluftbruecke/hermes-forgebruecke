@@ -4,8 +4,10 @@ sits on the client.
 
 Shapes (what the pane renders):
 
-    desk     {ok, label, counts{waiting, running, blocked}, rows[Row], repos[RepoCard], engine{...},
-              can_merge, you, waiting_note{message, suggestion, settings_href} | null, notes[],
+    desk     {ok, label, counts{waiting, parked, running, blocked} (waiting: section "now" only), rows[Row],
+              repos[RepoCard], engine{...},
+              can_merge, can_comment (his write token can comment: the feature owner_comment), you,
+              waiting_note{message, suggestion, settings_href} | null, notes[],
               repos_error (a sentence when the repo list could not be read) | null,
               forge_error? (a sentence: Hermes' token is missing), generated_at,
               age_s (how old this read is when the route answers)}
@@ -15,7 +17,11 @@ Shapes (what the pane renders):
               last_comment{author, at, body, url, age_s} | null (the last one a person wrote), waiting_on,
               can_merge, next (one of MOVES: the main button), updated_at, age_s, mergeable (null: unknown),
               draft (null: unknown),
-              summary{tone: ok | wait | run | bad, text: one sentence}, review_summary | null}
+              summary{tone: ok | wait | run | bad, text: one sentence}, review_summary | null,
+              wake_comment{author, at, url} | null (the newest comment not by you and not a flow status),
+              section ("now" | "parked"; always "now" outside the waiting tab),
+              parked{note, parked_at, wake_commits, seen, age_s} | null,
+              back{reason (ready | commit | comment), text, url} | null (a parked row that came back)}
     RepoCard {repo, right (admin | write | read), url, collaboration_url, private, flows[], mentions, admin,
               open_rows, open_prs}: every repo the agent account sees, those with open pull requests or a
               flow first (its Forgejo right is the only permission layer; the collaboration page is where
@@ -44,6 +50,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -143,30 +150,45 @@ def _checks(client, repo: str, sha: str) -> Optional[dict]:
     return _mod("tools.read").compact_status(combined)
 
 
-def _last_comment(client, repo: str, number: int, *, now: Callable[[], float] = time.time) -> Optional[dict]:
-    """The newest comment a person wrote. Forgebrücke's own comments (status and tool comments, marked by
-    their footer) are skipped: the row already shows what they say."""
+def _last_comment(client, repo: str, number: int, *, now: Callable[[], float] = time.time,
+                  you: Optional[str] = None) -> "tuple[Optional[dict], Optional[dict]]":
+    """``(last_comment, wake_comment)`` from the same pages (the last two of ten).
+
+    ``last_comment``: the newest comment a person wrote. Forgebrücke's own comments (status and tool comments,
+    marked by their footer) are skipped: the row already shows what they say.
+    ``wake_comment`` {author, at, url}: the newest comment not by ``you`` and not a flow status comment; a
+    comment Hermes posted with ``forgejo_comment`` counts (L14, provisional). A parked row wakes on it.
+    A failed read gives ``(None, None)``, which wakes nothing."""
     path = f"/repos/{repo}/issues/{number}/comments"
+    me = (you or "").lower()
+
+    def waker(c: dict) -> bool:
+        author = str((c.get("user") or {}).get("login") or "").lower()
+        return bool(author) and author != me and _FOOTERS[0] not in str(c.get("body") or "")
+
     try:
         first = client.get(path, {"limit": COMMENT_PAGE, "page": 1})
         total = int((first.headers or {}).get("x-total-count") or 0) if hasattr(first, "headers") else 0
         last_page = max(1, -(-total // COMMENT_PAGE))
-        found = None
+        found = wakes = None
         for page in (last_page, last_page - 1):
             if page < 1:
                 break
             items = (first if page == 1 else client.get(path, {"limit": COMMENT_PAGE, "page": page})).data or []
-            found = next((c for c in reversed(items) if not _own(c)), None)
-            if found is not None:
+            found = found or next((c for c in reversed(items) if not _own(c)), None)
+            wakes = wakes or next((c for c in reversed(items) if waker(c)), None)
+            if found is not None and wakes is not None:
                 break
     except Exception:
-        return None
+        return None, None
+    wake = ({"author": (wakes.get("user") or {}).get("login"), "at": wakes.get("created_at"),
+             "url": wakes.get("html_url")} if wakes is not None else None)
     if found is None:
-        return None
+        return None, wake
     at = _epoch(found.get("created_at"))
-    return {"author": (found.get("user") or {}).get("login"), "at": found.get("created_at"),
-            "body": _cap(plain_text(found.get("body")), MAX_COMMENT), "url": found.get("html_url"),
-            "age_s": max(0, int(now() - at)) if at is not None else None}
+    return ({"author": (found.get("user") or {}).get("login"), "at": found.get("created_at"),
+             "body": _cap(plain_text(found.get("body")), MAX_COMMENT), "url": found.get("html_url"),
+             "age_s": max(0, int(now() - at)) if at is not None else None}, wake)
 
 
 _FOOTERS = ("Kept up to date by Forgebrücke", "Posted by Hermes through Forgebrücke")
@@ -269,11 +291,12 @@ def row(st: dict, client: Any, *, can_merge: bool, now: Callable[[], float] = ti
               "segment": segment(g.get("state")), "detail": _cap(g.get("detail"), 200)}
              for g in st.get("gates") or []]
     human = _human(st)
+    last, wake = _last_comment(client, repo, n, now=now, you=you) if client is not None else (None, None)
     return {"id": f"{repo}#{n}", "tab": tab, "repo": repo, "number": n, "title": st.get("title") or f"PR #{n}",
             "url": st.get("url") or "", "author": st.get("author"), "base": st.get("base"),
             "head_ref": st.get("head_ref"), "head_sha": sha, "flow": st.get("flow"), "reason": None, "gates": gates,
             "checks": _checks(client, repo, sha) if client is not None and sha else None,
-            "last_comment": _last_comment(client, repo, n, now=now) if client is not None else None,
+            "last_comment": last, "wake_comment": wake,
             "waiting_on": _waiting_on(human) if (human or {}).get("state") == "waiting" else None,
             "can_merge": bool(can_merge and mine), "updated_at": st.get("updated_at"), "mergeable": None,
             "draft": None,
@@ -329,13 +352,14 @@ def review_rows(client: Any, you: str, known: set, can_merge: bool = False, ever
             else:
                 continue
             sha = (pr.get("head") or {}).get("sha") or ""
+            last, wake = _last_comment(client, repo, n, now=now, you=you)
             rows.append({"id": f"{repo}#{n}", "tab": "waiting", "repo": repo, "number": n,
                          "title": pr.get("title") or f"PR #{n}", "url": pr.get("html_url") or "",
                          "author": (pr.get("user") or {}).get("login"), "base": (pr.get("base") or {}).get("ref"),
                          "head_ref": (pr.get("head") or {}).get("ref"), "head_sha": sha, "flow": None,
                          "reason": reason, "gates": [],
                          "checks": _checks(client, repo, sha) if sha else None,
-                         "last_comment": _last_comment(client, repo, n, now=now), "waiting_on": None,
+                         "last_comment": last, "wake_comment": wake, "waiting_on": None,
                          "can_merge": bool(can_merge and reason == rr.ASKED), "next": _move(True, None, False),
                          "updated_at": _epoch(pr.get("updated_at")), "mergeable": _mergeable(pr),
                          "draft": _draft(pr)})
@@ -381,9 +405,11 @@ def suggest_login(client: Any, counts: dict, agent: str) -> str:
 
 
 def build_desk(access: Any, store: Any, *, can_merge: bool = False, now: Callable[[], float] = time.time,
-               you_hint: Optional[dict] = None) -> dict:
+               you_hint: Optional[dict] = None, data_dir: Any = None, prune: bool = False) -> dict:
     """``you_hint`` ({login, source}) is who the settings route already found the user to be; without it the
-    desk asks the forge itself when ``you`` is empty."""
+    desk asks the forge itself when ``you`` is empty. ``data_dir`` holds the parked rows (``parking.py``);
+    without it nothing is parked. ``prune`` (only the page's ``GET /desk``) drops parked entries of pull
+    requests that are no longer open, and only after a complete scan."""
     forge_error = None
     try:
         client = access.reader()
@@ -398,9 +424,11 @@ def build_desk(access: Any, store: Any, *, can_merge: bool = False, now: Callabl
     failure: Optional[Exception] = None
     waiting_note = None
     pulls: dict = {}
+    complete_scan, scan_at = False, now()
     if client is not None and you:
         try:
             pulls, notes = _mod("review_requests").open_pulls(client)
+            complete_scan = not notes  # a cut search, a cut repo list or an unreadable repo: never prune
             extra, _ = review_rows(client, you, {r["id"].lower() for r in rows}, can_merge=can_merge,
                                    every_pr=access.settings.review_every_pr, pulls=pulls, now=now)
             by_id = {f"{repo}#{pr.get('number')}".lower(): pr for repo, prs in pulls.items() for pr in prs}
@@ -410,7 +438,7 @@ def build_desk(access: Any, store: Any, *, can_merge: bool = False, now: Callabl
             rows += extra
         except Exception as exc:  # the flow rows still render when the search fails
             missing.append("review requests")
-            failure = exc
+            failure, complete_scan = exc, False
     elif not you:
         hint = dict(you_hint or {})
         if not hint and client is not None:
@@ -432,6 +460,21 @@ def build_desk(access: Any, store: Any, *, can_merge: bool = False, now: Callabl
             failure, repos_error = failure or exc, REPOS_UNREAD
     if missing:
         notes.append(f"{_observed(failure)} {' and '.join(missing).capitalize()} are missing.")
+    park_mod = _mod("parking")
+    parked, unreadable = park_mod.load(data_dir)
+    if unreadable:
+        notes.append(park_mod.CORRUPT_NOTE)
+    elif prune and complete_scan and data_dir:
+        keep = {f"{repo}#{pr.get('number')}" for repo, prs in pulls.items() for pr in prs}
+        gone = park_mod.prune(data_dir, keep | {r["id"] for r in rows if r.get("flow")}, scan_at=scan_at, now=now)
+        parked = {k: v for k, v in parked.items() if k not in gone}
+    for r in rows:
+        entry = parked.get(r["id"].lower()) if r["tab"] == "waiting" else None
+        r["back"] = park_mod.wake(entry, r, now, forge_url=access.settings.url) if entry else None
+        r["parked"] = ({"note": entry.get("note") or "", "parked_at": entry.get("parked_at"),
+                        "wake_commits": bool(entry.get("wake_commits")), "seen": entry.get("seen"),
+                        "age_s": max(0, int(now() - int(entry.get("parked_at") or 0)))} if entry else None)
+        r["section"] = "parked" if entry and not r["back"] else "now"
     for r in rows:
         r["age_s"] = max(0, int(now() - r["updated_at"])) if r.get("updated_at") else None
         if r["can_merge"] and (r.get("draft") or r.get("mergeable") is False):  # Forgejo would refuse the merge
@@ -439,22 +482,117 @@ def build_desk(access: Any, store: Any, *, can_merge: bool = False, now: Callabl
         r["summary"] = summarise(r, you)
         r["review_summary"] = _review_summary(r)
     order = {t: i for i, t in enumerate(TABS)}
-    rows.sort(key=lambda r: (order[r["tab"]], -(r.get("updated_at") or 0)))
-    counts = {t: sum(1 for r in rows if r["tab"] == t) for t in TABS}
+    rows.sort(key=lambda r: (order[r["tab"]], r["section"] == "parked", r["back"] is None,
+                             -((r["parked"] or {}).get("parked_at") or 0) if r["section"] == "parked"
+                             else -(r.get("updated_at") or 0)))
+    counts = {t: sum(1 for r in rows if r["tab"] == t and r["section"] == "now") for t in TABS}
+    counts = {"waiting": counts["waiting"], "parked": sum(1 for r in rows if r["section"] == "parked"),
+              "running": counts["running"], "blocked": counts["blocked"]}
     engine = store.engine() or {}
     tick_age = int(now() - engine["at"]) if engine.get("at") else None
-    late_after = max(LATE_FLOOR_S, LATE_TICKS * access.settings.poll_interval)
-    if tick_age is not None and tick_age > late_after and _mod("flows.loop").has_work(access.settings):
+    if late_tick(engine, access.settings, now) is not None and any(r.get("flow") for r in rows):
         notes.append(f"Flows last ran {_ago(tick_age)}. Rows of a flow may be out of date.")
     out = {"ok": True, "label": nav_label(counts["waiting"]), "counts": counts, "rows": rows,
            "repos": repos, "repos_error": repos_error, "can_merge": bool(can_merge), "you": you or None,
-           "waiting_note": waiting_note, "notes": notes,
+           "can_comment": False, "waiting_note": waiting_note, "notes": notes,
            "engine": {"at": engine.get("at"), "source": engine.get("source"), "age_s": tick_age,
                       "errors": (engine.get("errors") or [])[:3]},
-           "forge_url": access.settings.url, "generated_at": int(now())}
+           "forge_url": access.settings.url, "version": _mod("version").VERSION, "generated_at": int(now())}
     if forge_error:
         out["forge_error"] = forge_error
     return out
+
+
+def late_tick(engine: dict, settings: Any, now: Callable[[], float]) -> Optional[int]:
+    """Seconds since the last flows tick when that is late and a tick has work, else None."""
+    if not (engine or {}).get("at"):
+        return None
+    age = int(now() - engine["at"])
+    late_after = max(LATE_FLOOR_S, LATE_TICKS * settings.poll_interval)
+    return age if age > late_after and _mod("flows.loop").has_work(settings) else None
+
+
+UPDATE_PENDING = "channel-update-pending.json"  # written by channel/adapter.py
+STOPPED_FIX = "Restart Hermes' gateway, or check the Forgebrücke tick job."
+
+
+def background(data_dir: Any, settings: Any, now: Callable[[], float]) -> Optional[dict]:
+    """What stopped in the background, for the settings page: ``{text, fix, since}`` or None. A mention channel
+    that stopped for a half-finished update says so; otherwise a late flows tick (it also asks for reviews)."""
+    if not data_dir:
+        return None
+    try:
+        marker = json.loads((Path(data_dir) / UPDATE_PENDING).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        marker = None
+    if isinstance(marker, dict) and marker.get("at"):
+        age = max(0, int(now() - float(marker["at"])))
+        return {"text": f"Mentions and review requests stopped {_ago(age)}.",
+                "fix": "Restart the gateway to finish the update.", "since": int(marker["at"])}
+    engine = _mod("flows.state").FlowStore(data_dir).engine() or {}
+    age = late_tick(engine, settings, now)
+    if age is None:
+        return None
+    return {"text": f"Mentions and review requests stopped {_ago(age)}.", "fix": STOPPED_FIX,
+            "since": int(engine["at"])}
+
+
+MAX_PROTECTION_READS = 10
+
+
+def unprotected_mains(access: Any) -> list:
+    """With Security audit on: repos where Hermes' account is admin (only an admin can read branch rules) and
+    the default branch has no protection rule. ``[{repo, branch, url}]``, at most MAX_PROTECTION_READS reads."""
+    if not access.settings.audit_enabled:
+        return []
+    out = []
+    admin = [r for r in access.repos() if r.get("right") == "admin" and not r.get("archived")]
+    for r in admin[:MAX_PROTECTION_READS]:
+        branch = r.get("default_branch") or "main"
+        try:
+            found = _mod("tools.repos")._protection(access, r["repo"], branch)
+        except Exception:
+            continue
+        if found.get("protected") is False:
+            base = r.get("url") or f"{access.settings.url.rstrip('/')}/{r['repo']}"
+            out.append({"repo": r["repo"], "branch": branch, "url": f"{base}/settings/branches"})
+    return out
+
+
+# The routes of a profile other than the default run in that profile's plugin host child, which reads the
+# profile's secrets once, when it starts (Hermes hermes_cli/plugin_host.py). A token saved later stays unseen
+# until the child restarts. Hermes marks the child with this variable.
+HOST_PROCESS_ENV = "HERMES_PLUGIN_HOST_PROCESS"
+_IMPORTED = time.time()
+
+
+def _process_started() -> float:
+    """This process's start time: /proc on Linux, else when this module was imported (later, so a token saved
+    in between reads as seen)."""
+    try:
+        fields = Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()
+        btime = next(int(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines()
+                     if line.startswith("btime "))
+        return btime + int(fields[19]) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError, StopIteration, AttributeError):
+        return _IMPORTED
+
+
+def in_plugin_host() -> bool:
+    return os.environ.get(HOST_PROCESS_ENV) == "1"
+
+
+def tokens_unseen(home: Any) -> bool:
+    """True when this plugin host child started before the profile's .env last changed."""
+    if not home or not in_plugin_host():
+        return False
+    try:
+        return (Path(home) / ".env").stat().st_mtime > _process_started()
+    except OSError:
+        return False
+
+
+RELOAD_TEXT = "Hermes has not picked up a token saved after it started."
 
 
 REPOS_UNREAD = "The repo list could not be read."
@@ -501,10 +639,18 @@ def clear_cache() -> None:
         _cache.clear()
 
 
+def clear_desk_cache() -> None:
+    """Drop only the cached desk answers. The hour-long write-token facts stay: a park changes no token, and
+    dropping them would rerun the doctor's write-scope probes on the next desk read."""
+    with _lock:
+        for k in [k for k in _cache if k and k[0] == "desk"]:
+            del _cache[k]
+
+
 # --- the routes' functions: each returns (http_status, body) ---------------------------------------
 
 def api_settings(get_setting, get_secret, *, transport: Any = None, refresh: bool = False,
-                 now: Callable[[], float] = time.time, home: Any = None) -> "tuple[int, dict]":
+                 now: Callable[[], float] = time.time, home: Any = None, data_dir: Any = None) -> "tuple[int, dict]":
     def make() -> dict:
         rep = _plugin_root().doctor_report(get_setting, get_secret, transport=transport)
         profile = _mod("profile")
@@ -529,6 +675,13 @@ def api_settings(get_setting, get_secret, *, transport: Any = None, refresh: boo
         action = next_action(rep, default, login=login, verdicts=verdicts)
         rows = setup_rows(rep, default, action, verdicts)
         said = {action["text"], *(r["problem"] for r in rows)}
+        unprotected: list = []
+        if default.audit_enabled and not instance.get("error"):
+            try:
+                unprotected = unprotected_mains(_mod("access").load_access(get_setting, get_secret, transport=transport,
+                                                                           lane="agent"))
+            except Exception:
+                unprotected = []
         return {"ok": True, "state": ACTIONS[action["id"]][0], "next_action": action, "setup": rows,
                 "forge_url": instance.get("url"), "forge_error": (instance.get("error") or {}).get("message"),
                 "tokens": tokens, "features": rep.get("features") or [],
@@ -539,9 +692,14 @@ def api_settings(get_setting, get_secret, *, transport: Any = None, refresh: boo
                 "switches": {key: bool(getattr(default, key)) for key in SWITCHES},
                 "reviewer": {"name": REVIEWER, "exists": REVIEWER in profiles,
                              "command": reviewer_command(profile.current_name(home))},
+                "background": background(data_dir, default, now), "unprotected": unprotected,
+                "version": _mod("version").VERSION,
                 "settings_href": SETTINGS_HREF, "generated_at": int(now())}
     try:
-        return 200, _cached(("settings",), SETTINGS_TTL_S, refresh, make, now)
+        body = _cached(("settings",), SETTINGS_TTL_S, refresh, make, now)
+        # Read on every answer, never cached: a token saved a second ago must show at once.
+        unseen = tokens_unseen(home)
+        return 200, {**body, "reload": {"needed": unseen, "text": RELOAD_TEXT if unseen else None}}
     except Exception as exc:
         return 200, _refusal_body(exc)
 
@@ -679,8 +837,8 @@ def _write_token_facts(get_setting, get_secret, *, transport: Any = None, now: C
     scope probes are requests that are not reads, so the answer is kept for an hour per pair of tokens: a
     poll with nobody clicking must not repeat them. A check Forgejo could not finish is not kept."""
     creds = _mod("settings").load_credentials(get_secret)
-    if not creds.owner_token:
-        return {"can_merge": False, "login": None, "source": None}  # never probe for a field that is empty
+    if not creds.owner_token:  # never probe for a field that is empty
+        return {"can_merge": False, "can_comment": False, "login": None, "source": None}
     held = "\0".join((str(get_setting("url", "") or ""), creds.token or "", creds.owner_token))
     key = ("write_token", hashlib.sha256(held.encode("utf-8")).hexdigest())
     with _lock:
@@ -688,8 +846,8 @@ def _write_token_facts(get_setting, get_secret, *, transport: Any = None, now: C
         if hit and not refresh and now() - hit[0] < WRITE_TOKEN_TTL_S:
             return hit[1]
     body = api_settings(get_setting, get_secret, transport=transport, now=now, refresh=refresh)[1]
-    feat = next((f for f in body.get("features") or [] if f.get("id") == "owner_merge"), None)
-    facts = {"can_merge": bool(feat and feat.get("status") == "available"),
+    lit = {f.get("id") for f in body.get("features") or [] if f.get("status") == "available"}
+    facts = {"can_merge": "owner_merge" in lit, "can_comment": "owner_comment" in lit,
              "login": body.get("you_suggestion"), "source": body.get("you_source")}
     owner = next((t for t in body.get("tokens") or [] if t.get("role") == "owner"), None)
     if body.get("features") and _mod("capabilities").token_verdict(owner)["state"] != "unchecked":
@@ -722,7 +880,9 @@ def api_desk(get_setting, get_secret, *, data_dir: Any, transport: Any = None, r
         hint = None
         if not access.settings.you and mine["login"]:
             hint = {"login": mine["login"], "source": mine["source"]}
-        return build_desk(access, store, can_merge=mine["can_merge"], now=now, you_hint=hint)
+        out = build_desk(access, store, can_merge=mine["can_merge"], now=now, you_hint=hint, data_dir=data_dir,
+                         prune=True)
+        return {**out, "can_comment": bool(mine.get("can_comment"))}
     try:
         body = _cached(("desk", str(data_dir)), DESK_TTL_S, refresh, make, now)
     except Exception as exc:
@@ -787,8 +947,120 @@ def api_merge(get_setting, get_secret, body: Any, *, data_dir: Any, transport: A
                  **note}
 
 
+MAX_COMMENT_BODY = 10_000
+
+
+def api_comment(get_setting, get_secret, body: Any, *, data_dir: Any, transport: Any = None,
+                now: Callable[[], float] = time.time) -> "tuple[int, dict]":
+    """The desk's Comment button: his words, posted with his write token (owner lane), on his click, as him.
+    Hermes' approval setting and the preview switch do not apply (like Merge). No footer. The answer says
+    "posted" only after Forgejo reads the comment back with the same body."""
+    body = body if isinstance(body, dict) else {}
+    acc = _mod("access")
+    try:
+        repo, number = _pr_of(body)
+        text = body.get("body")
+        text = text.strip() if isinstance(text, str) else ""
+        if not text:
+            raise ValueError("Write a comment first.")
+        if len(text) > MAX_COMMENT_BODY:
+            raise ValueError(f"A comment holds at most {MAX_COMMENT_BODY:,} characters.")
+    except ValueError as exc:
+        return _bad(str(exc))
+    try:
+        mine = _write_token_facts(get_setting, get_secret, transport=transport, now=now)
+        if not mine.get("can_comment"):  # before owner_writer: its own refusal names the Merge button
+            raise acc.Refusal("dark", _mod("capabilities").dark_sentence("owner_comment"), "owner_token")
+        writer = acc.load_access(get_setting, get_secret, transport=transport, lane="owner").owner_writer()
+        pr = writer.get(f"/repos/{repo}/pulls/{number}").data or {}
+        if pr.get("merged") or pr.get("state") != "open":
+            return 409, {"ok": False, "error": "not_open", "message": f"{repo}#{number} is no longer open. Nothing was posted."}
+        sent = writer.post(f"/repos/{repo}/issues/{number}/comments", {"body": text}).data or {}
+        back = writer.get(f"/repos/{repo}/issues/comments/{int(sent.get('id') or 0)}").data or {}
+    except acc.Refusal as exc:
+        return 403, _refusal_body(exc)
+    except Exception as exc:  # Forgejo answered with an error: say what it said
+        return 502, {"ok": False, "error": "forge_error", "message": getattr(exc, "message", str(exc))}
+    who = (back.get("user") or {}).get("login") or "you"
+    ok = str(back.get("body") or "").strip() == text
+    clear_desk_cache()
+    note = _logged(data_dir, {"at": int(now()), "action": "comment", "repo": repo, "number": number,
+                              "id": sent.get("id"), "chars": len(text), "lane": "owner", "read_back": ok})
+    return 200, {"ok": ok, "id": sent.get("id"), "url": back.get("html_url") or sent.get("html_url"),
+                 "message": (f"Comment posted as @{who}." if ok else
+                             "Forgejo took the comment but reads back a different text. Open it in Forgejo."), **note}
+
+
+def api_reload_tokens(*, data_dir: Any = None, exit_later: Optional[Callable[[], None]] = None,
+                      now: Callable[[], float] = time.time) -> "tuple[int, dict]":
+    """The settings page's "Load it now": ends this profile's plugin host child after the answer is sent. Hermes
+    starts a new one on the next request, which reads the profile's .env again. Refused outside a plugin host
+    child: there the routes run inside Hermes' dashboard itself, which must not end."""
+    if not in_plugin_host():
+        return 409, {"ok": False, "error": "not_here",
+                     "message": "This page runs inside Hermes' dashboard. Restart the dashboard to load a new token."}
+    note = _logged(data_dir, {"at": int(now()), "action": "reload_tokens", "pid": os.getpid()})
+    if exit_later is None:
+        timer = threading.Timer(0.5, os._exit, (0,))
+        timer.daemon = True
+        exit_later = timer.start
+    exit_later()
+    return 200, {"ok": True, "message": "Hermes reloads this profile's plugins now.", **note}
+
+
 def _bad(message: str) -> "tuple[int, dict]":
     return 400, {"ok": False, "error": "bad_request", "message": message}
+
+
+def _pr_of(body: Any) -> "tuple[str, int]":
+    """``(repo, number)`` from a route body; ``ValueError`` with the sentence to show."""
+    acc = _mod("access")
+    try:
+        repo = acc.parse_repo(body.get("repo"))
+    except acc.Refusal as exc:
+        raise ValueError(str(getattr(exc, "message", "") or "repo must be owner/name.")) from None
+    number = body.get("number")
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        raise ValueError("number must be a pull request number.")
+    return repo, number
+
+
+def api_park(body: Any, *, data_dir: Any, now: Callable[[], float] = time.time) -> "tuple[int, dict]":
+    """The desk's Park button: his click sets one pull request aside under Waiting for me, with an optional
+    note only he sees. Nothing goes to Forgejo. ``seen`` is the row as the desk showed it; the desk compares
+    later reads against it (``parking.wake``). The answer carries no sidebar label: the next desk read sets it."""
+    body = body if isinstance(body, dict) else {}
+    try:
+        repo, number = _pr_of(body)
+        note = body.get("note", "")
+        if not isinstance(note, str):
+            raise ValueError("note must be text.")
+        if not isinstance(body.get("wake_commits"), bool):
+            raise ValueError("wake_commits must be true or false.")
+        if not isinstance(body.get("seen"), dict):
+            raise ValueError("seen must be the row's head_sha, comment_at and draft.")
+        if not data_dir:
+            raise ValueError("The plugin's data folder is missing.")
+        entry, logged = _mod("parking").park(data_dir, repo, number, note=note, wake_commits=body["wake_commits"],
+                                             seen=body["seen"], now=now)
+    except ValueError as exc:
+        return _bad(str(exc))
+    clear_desk_cache()
+    return 200, {"ok": True, "parked": entry, **logged}
+
+
+def api_unpark(body: Any, *, data_dir: Any, now: Callable[[], float] = time.time) -> "tuple[int, dict]":
+    """Unpark and Undo: the pull request is back in Waiting for me. Unparking one that is not parked is fine."""
+    body = body if isinstance(body, dict) else {}
+    try:
+        repo, number = _pr_of(body)
+        if not data_dir:
+            raise ValueError("The plugin's data folder is missing.")
+    except ValueError as exc:
+        return _bad(str(exc))
+    removed, logged = _mod("parking").unpark(data_dir, repo, number, now=now)
+    clear_desk_cache()
+    return 200, {"ok": True, "removed": removed, **logged}
 
 
 def api_set_setting(body: Any, *, save: Callable[[str, Any], None], get_setting, get_secret, transport: Any = None,

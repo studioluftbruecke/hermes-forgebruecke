@@ -1,19 +1,21 @@
 # Forgebrücke
 
-**A bridge to your forge.** Forgebrücke connects Hermes Agent to your self-hosted
+**A bridge to your Forgejo.** Forgebrücke connects Hermes Agent to your self-hosted
 [Forgejo](https://forgejo.org). Gitea works where its API matches. Hermes works there as its own
-account, you approve what it writes, and the merge stays yours.
+account on its own feature branches, and the merge into `main` stays yours.
 
 ![The Forgejo desk in Hermes Desktop](docs/screenshot-1.png)
 
-Version 0.0.20. MIT. A Studio Luftbrücke Hermes plugin.
+Version 0.0.21. MIT. A Studio Luftbrücke Hermes plugin.
 
 ## What it does
 
-- **Desk.** The pull requests that wait for you, each with its state in one sentence. In Hermes
-  Desktop, or `hermes forgebruecke desk` in a terminal.
-- **Chat and writes.** Ask about issues, pull requests, checks and repos. Comments, pull requests
-  and checks are shown to you first.
+- **Desk.** The pull requests that wait for you, each with its state in one sentence, in Desktop
+  or `hermes forgebruecke desk`.
+- **Parking.** Park a waiting pull request with a note only you see. It leaves the count and comes
+  back on someone's comment, new commits, or when marked ready.
+- **Chat and writes.** Ask about issues, pull requests, checks and repos. Writes follow Hermes'
+  approval setting.
 - **Receipts.** "Pushed", "opened" or "merged" in a reply is checked against Forgejo and marked ✓ or ❌.
 - **Flows and mentions.** Per repo: agent review, checks, optional staging, then you. Hermes
   answers mentions of its account in the thread.
@@ -21,8 +23,8 @@ Version 0.0.20. MIT. A Studio Luftbrücke Hermes plugin.
 
 ## Install and update
 
-Forgebrücke needs Hermes 0.23.0 or newer. Run the first line where Hermes runs. With Hermes on a
-server, run the second line on the Desktop computer too.
+Needs Hermes 0.23.0 or newer. Run the first line where Hermes runs; with Hermes on a server, the
+second on the Desktop computer too.
 
 ```bash
 hermes plugins install https://github.com/studioluftbruecke/hermes-forgebruecke --enable
@@ -36,12 +38,11 @@ Then start a new chat. Update with `hermes plugins update forgebruecke` in the s
 Desktop draws the desk and settings from its own computer, so both places need the same version:
 
 - On the server, add `-p <profile>` to the install and update commands.
-- Then Capabilities → Plugins → Rescan; switch a new Desktop half on there.
-- Tokens and settings go into the server profile only (Desktop connected to the server, Settings →
-  Plugins → Forgebrücke). The Desktop computer's copy needs none.
+- Then Capabilities → Plugins → Rescan; switch a new Desktop half on.
+- Tokens and settings go into the server profile only; the Desktop computer's copy needs none.
 - After a server update, switch **Agent in <profile>** off and on there, then start a new chat.
 - The mention channel needs `hermes gateway restart` on the server; off and on is not enough.
-- Compare the Version column of `hermes plugins list` on both computers.
+- Compare `hermes plugins list` on both computers.
 
 ## First use
 
@@ -54,16 +55,15 @@ Desktop draws the desk and settings from its own computer, so both places need t
 3. **Let Hermes write.** A new setup only previews writes. Switch on "Let Hermes write". Then ask
    "What waits for me on Forgejo?"
 
-The Forgebrücke page names the next step. `hermes forgebruecke doctor` prints the same check in a
-terminal.
+The Forgebrücke page and `hermes forgebruecke doctor` name the next step.
 
 ![Forgebrücke settings](docs/screenshot-4.png)
 
 Optional:
 
-- **Merge from the desk.** Add your write token, a token of your own account with
-  `write:repository` and `read:user`. Any agent shell on the Hermes host can read it and could merge
-  as you.
+- **Merge and comment from the desk.** Add your write token, a token of your own account with
+  `write:repository`, `read:user` and `write:issue`. It is also exposed to Hermes, ultimately giving
+  Hermes full access to your account.
 - **Git as Hermes' account.** `hermes forgebruecke git-credential` prints the three `git config` lines.
 - **Mentions.** Run these two commands. The doctor names what is still missing.
 
@@ -77,18 +77,18 @@ Optional:
 - **The merge is yours.** Nothing approves or merges `main`. A flow can merge only into an
   unprotected branch you named, such as `staging`.
 - **Forgejo decides where.** Hermes reads and writes only where its account has access.
-- **You approve each write.** "Allow for this session" and "always" apply per tool and repo. With
-  Hermes' approvals off, writes go out unasked.
+- **Writes follow Hermes' approval setting.** With approvals on, each write asks; with approvals
+  off, writes go out unasked. Protect `main` so only you push and merge there.
 - **Unattended runs do not write** (cron jobs, single-query runs, mention turns), except a flow you
   wrote and review requests to you.
-- **A new commit or a changed flow is checked again.** A push or a higher `version` in the
-  flow file runs every gate again. After a failed or edited gate, that gate and the later ones run.
+- **A new commit or a changed flow is checked again.** A push or a higher flow `version` reruns
+  every gate; a failed or edited gate reruns from there.
 - **One flow per repo.** A rule that lists several flows runs only the first one.
 
 ## If something is wrong
 
-- **Start with the doctor.** `hermes forgebruecke doctor` names the next step in its last line, and why
-  a feature is not available.
+- **Start with the doctor.** `hermes forgebruecke doctor` names the next step, and why a feature is
+  not available.
 - **A write changed nothing.** A new setup only previews. Switch on "Let Hermes write".
 - **A write was refused.** The refusal names the missing access and links the repo's Collaborators page.
 - **The desk lists no reviews.** Check that "You" is set (setup step 3).
@@ -102,7 +102,7 @@ Optional:
 | `url` | | Your Forgejo address |
 | `token` (`FORGEBRUECKE_BOT_ACCOUNT_TOKEN`) | | Hermes' token |
 | `you` | | Your Forgejo user name |
-| `owner_token` (`FORGEBRUECKE_PERSONAL_WRITE_TOKEN`) | | Your write token, for the desk's Merge button |
+| `owner_token` (`FORGEBRUECKE_PERSONAL_WRITE_TOKEN`) | | Your write token, for the desk's Merge and Comment buttons |
 | `dry_run` | on | Preview writes, send none |
 | `review_every_pr` | on | Ask you to review every open pull request |
 | `learn_mode` | off | Lesson cards |
@@ -111,18 +111,17 @@ Optional:
 | `flows_path` | `.forgebruecke/flows.yml` | Where a repo keeps its flow |
 | `default_review_profile` | this profile | Profile that runs a flow's review |
 | `mention_authors` | everyone with write access | Narrows whose mentions get an answer |
-| `poll_interval` | 120 | Seconds between polls of Forgejo (30 to 3600) |
+| `poll_interval` | 30 | Seconds between polls of Forgejo (30 to 3600) |
 
 ## Disclosures
 
 - **Network.** Only your Forgejo, polled on your interval. The doctor also reads its
   `/swagger.v1.json`.
-- **Scope detection.** The doctor learns a token's write scopes from requests that Forgejo must
-  reject. They are an empty `POST` to issues, pulls and `/user/repos`, and a `PATCH` of a missing
-  notification. Nothing is created.
+- **Scope detection.** The doctor learns a token's write scopes from requests Forgejo must reject:
+  empty `POST`s and a `PATCH` of a missing notification.
 - **Credentials.** Two tokens in your profile's `.env`, written by Hermes' settings. Any agent shell
   on that host can read them. The plugin never reads `FORGEJO_TOKEN` or another tool's token.
-- **Writes after your approval.**
+- **Writes, under Hermes' approval setting.**
   - Comments with an AI-disclosure footer, and line comments as a `COMMENT` review
   - Pull requests with labels and review requests
   - Checks on a commit
@@ -140,12 +139,13 @@ Optional:
   cannot write through tools. Its answer is posted as Hermes' account. Issue and comment text is
   untrusted input.
 - **Background processes.** A flow's review gate starts `hermes -p <profile> chat --query-file …`,
-  at most two at once. Each gets a minimal environment and no access to Forgejo, and writes a
-  verdict file for the engine.
+  at most two at once. Each gets a minimal environment, no Forgejo access, and writes a verdict file.
 - **The desk.** The page calls only this plugin's routes on your Hermes backend. `/merge` merges with
-  your write token, pinned to the commit the desk showed. `/setting` saves `you` and the four
+  your write token, pinned to the commit the desk showed; `/comment` posts your words as you.
+  `/park` and `/unpark` write only `parked.json`. `/setting` saves `you` and the four
   switches. "Create a reviewer profile" runs `hermes profile create` and removes every
-  `FORGEBRUECKE_*` key from the new profile. "Ask Hermes" opens a chat with a draft and sends nothing.
+  `FORGEBRUECKE_*` key from the new profile. `/reload-tokens` restarts the plugin host to read a new
+  token. "Ask Hermes" opens a chat with a draft and sends nothing.
   A process that can call these routes can do the same, so keep Hermes' approvals on.
 - **Guard.** A tool call that would edit the profile's settings or secrets, this plugin's files or
   its data folder asks you first. The guard catches direct routes, not every script.

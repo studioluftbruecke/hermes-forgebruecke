@@ -121,7 +121,8 @@ def repo_right(client, repo: str) -> Optional[str]:
 
 
 def agent_repos(client, *, max_items: int = 500) -> list:
-    """Every repo ``client``'s account sees: ``[{repo, right, owner, private, url, open_prs, archived}]``.
+    """Every repo ``client``'s account sees: ``[{repo, right, owner, private, url, open_prs, archived,
+    default_branch}]``.
     One paginated ``GET /user/repos``, which also fills the per-repo cache. The caller gets its own copy."""
     key = (client.account_key, "list", "")
     hit, value = _hit(key)
@@ -136,7 +137,8 @@ def agent_repos(client, *, max_items: int = 500) -> list:
             value.append({"repo": full, "right": right,
                           "owner": (r.get("owner") or {}).get("login") or full.split("/")[0],
                           "private": bool(r.get("private")), "url": r.get("html_url") or "",
-                          "open_prs": r.get("open_pr_counter"), "archived": bool(r.get("archived"))})
+                          "open_prs": r.get("open_pr_counter"), "archived": bool(r.get("archived")),
+                          "default_branch": r.get("default_branch") or "main"})
         _put(key, value)
     return [dict(r) for r in value]
 

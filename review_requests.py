@@ -57,7 +57,10 @@ def open_pulls(client: Any) -> "tuple[dict, list]":
     out: dict = {}
     for repo in repos:
         try:
-            out[repo] = client.paginate(f"/repos/{repo}/pulls", {"state": "open"}, max_items=100).items
+            page = client.paginate(f"/repos/{repo}/pulls", {"state": "open"}, max_items=100)
+            out[repo] = page.items
+            if page.has_more:  # an incomplete scan: the desk never prunes parked rows on it
+                notes.append(f"{repo}: only its 100 most recent open pull requests were read.")
         except ForgejoError as e:
             notes.append(f"{repo}: its open pull requests could not be read ({e.message})")
     return out, notes

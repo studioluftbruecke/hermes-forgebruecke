@@ -325,7 +325,7 @@ def test_setups_report_lists_scopes_and_what_each_lights():
     assert setups["agent_only"]["mint"] == {"FORGEBRUECKE_BOT_ACCOUNT_TOKEN": list(caps_mod.BOT_SCOPES)}
     assert "Merge button" not in setups["agent_only"]["lights"]
     assert "Merge button" in setups["agent_owner"]["lights"]
-    assert "could merge into main as you" in setups["agent_owner"]["summary"]
+    assert "full access to your account" in setups["agent_owner"]["summary"]
 
 
 def test_a_token_of_the_wrong_account_is_flagged_and_ignored():

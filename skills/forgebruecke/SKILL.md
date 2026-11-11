@@ -30,7 +30,7 @@ Forgejo is the source of truth. The user owns the merge.
 1. **Verify first.** Read it back before you say pushed, opened, green or merged. Quote the SHA that
    `forgejo_get` returned. A ❌ receipt under your answer means the claim was wrong, so correct it.
 2. **Never approve, never merge `main`.** No tool can. Give the PR link and let the user merge.
-3. **Forgejo sets where you write. The user approves each write.** A refusal names the missing
+3. **Forgejo sets where you write. Writes follow Hermes' approval setting.** A refusal names the missing
    access and links the repo's collaborator page. Pass that link on. Never edit plugin files or
    settings to get past it. With Hermes approvals off, writes go out unasked. Be sure before you call.
 4. **A preview is not a write.** `error: dry_run` or `sent: false` means nothing was written. Say so.

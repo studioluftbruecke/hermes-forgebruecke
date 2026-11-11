@@ -55,4 +55,4 @@ def test_one_word_per_thing():
     for word in ("the forge", "your forge address", "the instance", "agent account token", "the agent token",
                  "the agent's account", "Forgejo login", "the plugin's page", "settings form", "commit status"):
         assert word not in text, word
-    assert text.count("your forge") == 1  # the product line
+    assert text.count("your forge") == 0 and text.count("A bridge to your Forgejo.") == 1  # the product line (0.0.21)

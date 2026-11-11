@@ -33,7 +33,7 @@ def test_bot_only_setup_names_identity_scopes_and_dark_features():
                            "read:notification": "yes", "read:organization": "no", "write:issue": "yes",
                            "write:repository": "yes", "write:notification": "no", "write:user": "no"}
     assert report["tokens"][1] == {"role": "owner", "env": "FORGEBRUECKE_PERSONAL_WRITE_TOKEN", "set": False,
-                                   "note": "Optional. Only for the desk's Merge button."}
+                                   "note": "Optional. Only for the desk's Merge and Comment buttons."}
     assert len(report["tokens"]) == 2
     assert feature(report, "protection_view")["status"] == "dark"
     assert feature(report, "mentions")["status"] == "available"  # on by default (D31), no rule needed

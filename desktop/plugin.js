@@ -37,10 +37,13 @@ import {
   useQueryClient,
   useValue
 } from '@hermes/plugin-sdk'
-import { Component, useEffect, useState } from 'react'
+import { Component, useEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'forgebruecke'
+// The same string as plugin.yaml (tests/test_settings.py holds them equal). The routes answer Hermes' version,
+// so the pages can say when this half is older or newer.
+export const VERSION = '0.0.21'
 const PATH = '/forgebruecke'
 const TAG = '[' + ID + ']'
 const NAV_POLL_MS = 60000
@@ -196,17 +199,33 @@ function useSaveSetting() {
 
 // ── small pieces ─────────────────────────────────────────────────────────────────────────────────
 
-const MARK =
-  'M32 50 C12 46 12 37 32 33 C52 29 52 20 32 16 M32 50 C52 46 52 37 32 33 C12 29 12 20 32 16 M32 16 L32 56 M27 56 L37 56'
+// The decided mark H1-1 (BRAND.md): staff, two branches, the wings and two rings, in one colour so it follows
+// the theme. Geometry from the brand's small-size asset (forgebruecke-mark-mono.svg).
+const MARK_LINES = 'M32 16 L32 56 M32 50 C12 46 12 37 32 33 C52 29 52 20 32 16 M32 50 C52 46 52 37 32 33 C12 29 12 20 32 16'
+const WING = 'M0 0 C8 0 16 -2 22 -8 M-1 5 C6 5 12 4 17 0 M-2 10 C4 10 8 9 12 6'
 
 function Mark({ size }) {
+  const wing = transform => el('path', { d: WING, fill: 'none', stroke: 'currentColor', strokeWidth: 5.3, strokeLinecap: 'round', strokeLinejoin: 'round', transform })
+  const ring = cy => el('circle', { cx: 32, cy, r: 5.2, fill: 'var(--ui-bg-editor, transparent)', stroke: 'currentColor', strokeWidth: 3.6 })
   return el(
     'svg',
-    { 'aria-label': 'Forgebrücke', role: 'img', viewBox: '0 0 64 64', width: size || 20, height: size || 20, style: { color: T.primary, flex: 'none' } },
-    el('path', { d: MARK, fill: 'none', stroke: 'currentColor', strokeWidth: 5 }),
-    el('circle', { cx: 32, cy: 16, r: 6.5, fill: 'var(--ui-bg-editor, transparent)', stroke: 'currentColor', strokeWidth: 4 }),
-    el('circle', { cx: 32, cy: 50, r: 6.5, fill: 'var(--ui-bg-editor, transparent)', stroke: 'currentColor', strokeWidth: 4 })
+    { 'aria-label': 'Forgebrücke', role: 'img', viewBox: '0 0 64 64', width: size || 20, height: size || 20, style: { color: T.primary, flex: 'none' }, 'data-test': 'mark' },
+    el('g', { transform: 'translate(0 2.95)' },
+      el('path', { d: MARK_LINES, fill: 'none', stroke: 'currentColor', strokeWidth: 5, strokeLinejoin: 'round' }),
+      el('path', { d: 'M27 56 L37 56', stroke: 'currentColor', strokeWidth: 3 }),
+      wing('translate(39.5 13.5) scale(0.68 0.68) rotate(-26)'),
+      wing('translate(24.5 13.5) scale(-0.68 0.68) rotate(-26)'),
+      ring(16), ring(50))
   )
+}
+
+// Hermes answers with its version; a Desktop half of another version says so, with the command that updates it.
+function VersionNote({ version }) {
+  if (!version || version === VERSION) return null
+  return el('div', { 'data-test': 'version-note', style: { ...S.line(6), fontSize: '0.75rem', color: T.yellow, flexWrap: 'wrap' } },
+    el(Codicon, { name: 'warning', size: '0.75rem' }),
+    el('span', null, 'Desktop shows ' + VERSION + ', Hermes runs ' + version + '. Update the plugin on this computer: ',
+      el('code', null, 'hermes plugins update ' + ID)))
 }
 
 function openExternal(href) {
@@ -402,20 +421,39 @@ const MOVE = {
   open_in_forgejo: 'Open in Forgejo'
 }
 
-function Row({ row, onMerge }) {
+// Why a waiting row has no Merge button while the write token can merge.
+export function noMergeReason(row, canMerge) {
+  if (!canMerge || row.can_merge || row.tab !== 'waiting') return null
+  if (row.draft) return 'A draft. Forgejo merges it once it is marked ready.'
+  if (row.mergeable === false) return 'Forgejo cannot merge it yet.'
+  return null
+}
+
+function Row({ row, onMerge, canMerge, onPark, you, canComment }) {
+  const [commenting, setCommenting] = useState(false)
   const tone = TONE[(row.summary && row.summary.tone) || 'wait'] || TONE.wait
-  const meta = row.repo + ' #' + row.number + (row.author ? ' by ' + row.author : '') + (row.age_s != null ? ' · ' + ago(row.age_s) : '')
+  const meta = row.repo + (row.author ? ' by ' + row.author : '') + (row.age_s != null ? ' · ' + ago(row.age_s) : '')
+  const why = noMergeReason(row, canMerge)
+  const main = row.next === 'merge' ? el(Button, { onClick: () => onMerge(row), size: 'xs', 'data-test': 'merge' }, el(Codicon, { name: 'git-merge', size: '0.75rem' }), MOVE.merge)
+    : el(Button, { disabled: !row.url, onClick: () => openExternal(row.url), size: 'xs', variant: row.next === 'open_in_forgejo' ? 'secondary' : 'default', 'data-test': 'open', 'data-why': why || undefined }, el(Codicon, { name: 'link-external', size: '0.75rem' }), MOVE[row.next] || MOVE.open_in_forgejo)
   const comment = row.last_comment
   return el('div', { style: S.card, 'data-test': 'row', 'data-tab': row.tab },
     el('div', { style: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 } },
       el('div', { style: { ...S.col(2), minWidth: 0 } },
-        el('button', { className: 'fb-link text-sm font-medium', onClick: () => openExternal(row.url), style: { color: T.primary }, title: 'Open in Forgejo', type: 'button' }, row.title),
+        el('button', { className: 'fb-link text-sm font-medium', onClick: () => openExternal(row.url), style: { color: T.primary }, title: 'Open in Forgejo', type: 'button' }, '#' + row.number + ' ' + row.title),
         el('div', { style: S.small, title: row.head_sha ? 'Commit ' + row.head_sha.slice(0, 12) : undefined }, meta)),
       el('div', { style: { ...S.line(6), flex: 'none' } },
+        canComment && you && row.tab === 'waiting'
+          ? el(Tip, { label: PARK.commentTip(you) },
+            el(Button, { 'aria-label': PARK.commentTip(you), onClick: () => setCommenting(!commenting), size: 'xs', variant: 'ghost', 'data-test': 'comment-icon' }, el(Codicon, { name: 'comment', size: '0.8rem' })))
+          : null,
         el(AskHermes, { row }),
+        onPark && row.tab === 'waiting'
+          ? el(Button, { onClick: () => onPark(row), size: 'xs', variant: 'ghost', 'data-test': 'park' }, el(Codicon, { name: 'archive', size: '0.75rem' }), row.back ? PARK.again : PARK.park)
+          : null,
         row.can_merge && row.next !== 'merge' ? el(Button, { onClick: () => onMerge(row), size: 'xs', variant: 'secondary', 'data-test': 'merge' }, el(Codicon, { name: 'git-merge', size: '0.75rem' }), MOVE.merge) : null,
-        row.next === 'merge' ? el(Button, { onClick: () => onMerge(row), size: 'xs', 'data-test': 'merge' }, el(Codicon, { name: 'git-merge', size: '0.75rem' }), MOVE.merge)
-          : el(Button, { disabled: !row.url, onClick: () => openExternal(row.url), size: 'xs', variant: row.next === 'open_in_forgejo' ? 'secondary' : 'default', 'data-test': 'open' }, el(Codicon, { name: 'link-external', size: '0.75rem' }), MOVE[row.next] || MOVE.open_in_forgejo))),
+        why ? el(Tip, { label: why }, main) : main)),
+    row.back ? el(BackLine, { row }) : null,
     row.summary
       ? el('div', { style: { ...S.line(6), fontSize: '0.75rem', color: T.primary, alignItems: 'flex-start' }, 'data-test': 'summary', 'data-tone': row.summary.tone },
         el(Codicon, { name: tone.icon, size: '0.85rem', spinning: tone.spin, style: { color: tone.color, marginTop: 1 } }),
@@ -427,7 +465,236 @@ function Row({ row, onMerge }) {
     comment
       ? el('div', { style: { ...S.small, borderLeft: '2px solid ' + T.strokeSoft, paddingLeft: 8 }, 'data-test': 'comment' },
         el('span', { style: { color: T.primary } }, (comment.author || 'Someone') + (comment.age_s != null ? ', ' + ago(comment.age_s) : '') + ': '), comment.body)
-      : null)
+      : null,
+    commenting ? el(CommentBox, { row, you, onClose: () => setCommenting(false) }) : null)
+}
+
+// ── the parking area (0.0.21, PLAN-v0.0.21-park.md § 7) ─────────────────────────────────────────
+
+export const PARK = {
+  park: 'Park',
+  again: 'Park again',
+  title: n => 'Park #' + n + '?',
+  line: 'It leaves your count and comes back when something changes.',
+  noteLabel: 'Note (only you see it)',
+  notePlaceholder: 'For example: after the staging review',
+  commits: 'Also bring it back on new commits',
+  post: you => 'Also post the note on the PR, from @' + you,
+  parked: n => 'Parked #' + n + '.',
+  unparked: n => '#' + n + ' is back in Waiting for me.',
+  undo: 'Undo',
+  divider: p => 'Parked · ' + p,
+  parkedLine: (note, age) => (note ? note + ' · ' : '') + 'parked ' + age,
+  unpark: 'Unpark',
+  open: 'Open',
+  back: 'Back',
+  yourNote: note => 'Your note: ' + note,
+  whatChanged: 'What changed',
+  commentTip: you => 'Comment as @' + you,
+  commentPlaceholder: 'Write a comment. Markdown works.',
+  postAs: you => 'Post as @' + you,
+  cancel: 'Cancel',
+  commentHint: 'Posts with your write token, as you.',
+  posted: you => 'Comment posted as @' + you + '.'
+}
+
+// Inputs inside ConfirmDialog: its content confirms on Enter and Space from anywhere (Desktop's
+// confirm-dialog.tsx), so every key but Enter stays in the input. Enter parks; Space types.
+const onlyEnter = event => {
+  if (event.key !== 'Enter') event.stopPropagation()
+}
+
+export function seenOf(row) {
+  return { head_sha: row.head_sha || '', comment_at: (row.wake_comment && row.wake_comment.at) || null, draft: typeof row.draft === 'boolean' ? row.draft : null }
+}
+
+// The desk answer after a park or an unpark, before the refetch: the row moves, the counts and the label follow.
+export function withParked(data, id, parked) {
+  if (!data || !data.rows) return data
+  let moved = false
+  const rows = data.rows.map(r => {
+    if (r.id !== id || r.tab !== 'waiting') return r
+    moved = true
+    return parked ? { ...r, section: 'parked', back: null, parked } : { ...r, section: 'now', back: null, parked: null }
+  })
+  if (!moved) return data
+  const waiting = rows.filter(r => r.tab === 'waiting' && r.section !== 'parked').length
+  const counts = { ...(data.counts || {}), waiting, parked: rows.filter(r => r.section === 'parked').length }
+  return { ...data, rows, counts, label: formatNavLabel(waiting) }
+}
+
+function useParking() {
+  const client = useQueryClient()
+  const profile = useProfile()
+  const key = qk(profile, 'desk')
+  const show = (id, parked) => {
+    const next = withParked(client.getQueryData(key), id, parked)
+    if (next) {
+      client.setQueryData(key, next)
+      if (next.label) setNavLabel(next.label)
+    }
+  }
+  const refetch = () => client.invalidateQueries({ queryKey: key })
+  const park = async (row, { note, wakeCommits, seen }) => {
+    const out = await rest('/park', { method: 'POST', body: { repo: row.repo, number: row.number, note, wake_commits: wakeCommits, seen } })
+    if (!out || !out.ok) throw new Error((out && out.message) || 'Not parked.')
+    show(row.id, { ...out.parked, age_s: 0 })
+    void refetch()
+    host.notify({ kind: 'success', message: PARK.parked(row.number), action: { label: PARK.undo, onClick: () => void unpark(row, { quiet: true }) } })
+    return out
+  }
+  const unpark = async (row, { quiet } = {}) => {
+    try {
+      const out = await rest('/unpark', { method: 'POST', body: { repo: row.repo, number: row.number } })
+      if (!out || !out.ok) throw new Error((out && out.message) || 'Not unparked.')
+      show(row.id, null)
+      void refetch()
+      const was = row.parked
+      if (!quiet && was) {
+        host.notify({ kind: 'success', message: PARK.unparked(row.number), action: { label: PARK.undo, onClick: () => void park(row, { note: was.note || '', wakeCommits: was.wake_commits !== false, seen: was.seen || seenOf(row) }).catch(error => host.notify({ kind: 'error', message: error.message })) } })
+      }
+    } catch (error) {
+      host.notify({ kind: 'error', message: 'Not unparked: ' + error.message })
+    }
+  }
+  return { park, unpark }
+}
+
+function ParkDialog({ row, you, canComment, onClose }) {
+  const [note, setNote] = useState('')
+  const [commits, setCommits] = useState(true)
+  const [post, setPost] = useState(false)
+  const noteRef = useRef(null)
+  const flight = useRef(false)
+  const posted = useRef(false)
+  const { park } = useParking()
+  useEffect(() => {
+    // The dialog focuses its confirm button on open. This effect runs after the dialog's (a parent's effects
+    // follow its children's), and the tick keeps the note focused if Radix ever focuses later (Q-PK3).
+    const timer = window.setTimeout(() => noteRef.current && noteRef.current.focus(), 0)
+    return () => window.clearTimeout(timer)
+  }, [])
+  if (!row) return null
+  const text = note.trim()
+  const canPost = Boolean(canComment && you && text)
+  const run = async () => {
+    if (flight.current) return // ConfirmDialog with dismissOnConfirm never goes busy: a second Enter lands here
+    flight.current = true
+    try {
+      if (canPost && post && !posted.current) {
+        const out = await rest('/comment', { method: 'POST', body: { repo: row.repo, number: row.number, body: text } })
+        if (!out || !out.ok) throw new Error((out && out.message) || 'The note was not posted.')
+        posted.current = true // a failed park and a second confirm never post it twice
+        setPost(false)
+      }
+      await park(row, { note: text, wakeCommits: commits, seen: seenOf(row) })
+    } finally {
+      flight.current = false
+    }
+  }
+  const box = (checked, onChange, label, test) =>
+    el('label', { style: { ...S.line(6), fontSize: '0.75rem', color: T.primary, cursor: 'pointer' } },
+      el('input', { checked, onChange: e => onChange(e.target.checked), onKeyDown: onlyEnter, type: 'checkbox', 'data-test': test }), label)
+  return el(ConfirmDialog, {
+    children: el('div', { style: S.col(8) },
+      el('label', { style: S.col(4) },
+        el('span', { style: S.small }, PARK.noteLabel),
+        el('input', {
+          maxLength: 280, onChange: e => setNote(e.target.value), onKeyDown: onlyEnter, placeholder: PARK.notePlaceholder, ref: noteRef, type: 'text', value: note, 'data-test': 'park-note',
+          style: { background: 'transparent', border: '1px solid ' + T.stroke, borderRadius: 6, color: T.primary, font: 'inherit', fontSize: '0.8125rem', padding: '5px 8px' }
+        })),
+      box(commits, setCommits, PARK.commits, 'park-commits'),
+      canPost ? box(post, setPost, PARK.post(you), 'park-post') : null),
+    confirmLabel: PARK.park,
+    description: PARK.line,
+    dismissOnConfirm: true,
+    onClose,
+    onConfirm: run,
+    open: true,
+    title: PARK.title(row.number)
+  })
+}
+
+function BackLine({ row }) {
+  const note = row.parked && row.parked.note
+  return el('div', { style: { ...S.line(6), fontSize: '0.75rem', color: T.primary, alignItems: 'flex-start', flexWrap: 'wrap' }, 'data-test': 'back', 'data-reason': row.back.reason },
+    el(Badge, { variant: 'default' }, PARK.back),
+    el('span', null, row.back.text),
+    note ? el('span', { style: { color: T.secondary } }, PARK.yourNote(note)) : null,
+    row.back.url ? el('button', { className: 'fb-link', onClick: () => openExternal(row.back.url), style: { color: T.accent }, type: 'button', 'data-test': 'what-changed' }, PARK.whatChanged) : null)
+}
+
+function CommentBox({ row, you, onClose }) {
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const client = useQueryClient()
+  const profile = useProfile()
+  const send = async () => {
+    if (busy || !text.trim()) return
+    setBusy(true)
+    try {
+      const out = await rest('/comment', { method: 'POST', body: { repo: row.repo, number: row.number, body: text } })
+      if (!out || !out.ok) throw new Error((out && out.message) || 'Not posted.')
+      host.notify({ kind: 'success', message: PARK.posted(you), action: out.url ? { label: PARK.open, onClick: () => openExternal(out.url) } : undefined })
+      onClose()
+      void client.invalidateQueries({ queryKey: qk(profile, 'desk') })
+    } catch (error) {
+      host.notify({ kind: 'error', message: 'Not posted: ' + error.message })
+    } finally {
+      setBusy(false)
+    }
+  }
+  return el('div', { style: S.col(6), 'data-test': 'comment-box' },
+    el('textarea', {
+      autoFocus: true, onChange: e => setText(e.target.value), placeholder: PARK.commentPlaceholder, rows: 3, value: text, 'data-test': 'comment-text',
+      style: { background: 'transparent', border: '1px solid ' + T.stroke, borderRadius: 6, color: T.primary, font: 'inherit', fontSize: '0.8125rem', padding: '6px 8px', resize: 'vertical' }
+    }),
+    el('div', { style: { ...S.row(8), justifyContent: 'space-between' } },
+      el('span', { style: S.small }, PARK.commentHint),
+      el('div', { style: S.line(6) },
+        el(Button, { onClick: onClose, size: 'xs', variant: 'ghost' }, PARK.cancel),
+        el(Button, { disabled: busy || !text.trim(), onClick: send, size: 'xs', 'data-test': 'comment-post' }, PARK.postAs(you)))))
+}
+
+function ParkedRow({ row, onUnpark }) {
+  const p = row.parked || {}
+  return el('div', { style: { ...S.line(10), justifyContent: 'space-between', padding: '6px 12px', border: '1px solid ' + T.strokeSoft, borderRadius: 8 }, 'data-test': 'parked-row' },
+    el('div', { style: { ...S.col(1), minWidth: 0 } },
+      el('button', { className: 'fb-link', onClick: () => openExternal(row.url), style: { ...S.clip, fontSize: '0.8125rem', color: T.primary }, title: 'Open in Forgejo', type: 'button' }, '#' + row.number + ' ' + row.title),
+      el('div', { style: { ...S.small, ...S.clip }, 'data-test': 'parked-line' }, row.repo + ' · ' + PARK.parkedLine(p.note, ago(p.age_s || 0)))),
+    el('div', { style: { ...S.line(6), flex: 'none' } },
+      el(Button, { onClick: () => onUnpark(row), size: 'xs', variant: 'secondary', 'data-test': 'unpark' }, PARK.unpark),
+      el(Button, { disabled: !row.url, onClick: () => openExternal(row.url), size: 'xs', variant: 'ghost' }, el(Codicon, { name: 'link-external', size: '0.75rem' }), PARK.open)))
+}
+
+const PARKED_OPEN = profile => 'forgebruecke:parked-open:' + (profile || 'default')
+
+function readOpen(profile) {
+  try {
+    return window.localStorage.getItem(PARKED_OPEN(profile)) !== '0'
+  } catch {
+    return true
+  }
+}
+
+function ParkedArea({ rows, onUnpark }) {
+  const profile = useProfile()
+  const [open, setOpen] = useState(() => readOpen(profile))
+  const toggle = () => {
+    const next = !open
+    setOpen(next)
+    try {
+      window.localStorage.setItem(PARKED_OPEN(profile), next ? '1' : '0')
+    } catch {
+      /* the choice holds until the page reloads */
+    }
+  }
+  return el('div', { style: S.col(8), 'data-test': 'parked-area' },
+    el('button', { 'aria-expanded': open, className: 'fb-press', onClick: toggle, style: { ...S.line(8), fontSize: '0.75rem', color: T.secondary, padding: '2px 0' }, type: 'button', 'data-test': 'divider' },
+      el(DisclosureCaret, { open, size: '0.625rem' }),
+      el('span', null, PARK.divider(rows.length)),
+      el('span', { style: { flex: 1, borderTop: '1px solid ' + T.stroke } })),
+    open ? el('div', { style: S.col(6) }, ...rows.map(r => el(ParkedRow, { key: r.id, onUnpark, row: r }))) : null)
 }
 
 const EMPTY = { waiting: 'Nothing waits for you.', running: 'Nothing is running.', blocked: 'Nothing is blocked.' }
@@ -462,16 +729,21 @@ function Notes({ notes }) {
   return el('div', { style: S.col(2), 'data-test': 'notes' }, ...notes.map(n => el('div', { key: n, style: { ...S.small, color: T.yellow } }, n)))
 }
 
-function RowList({ rows, tab, setTab, onMerge, note, blocked }) {
-  const mine = rows.filter(r => r.tab === tab)
+function RowList({ rows, tab, setTab, onMerge, note, blocked, canMerge, onPark, you, canComment }) {
+  const { unpark } = useParking()
+  const all = rows.filter(r => r.tab === tab)
+  const mine = all.filter(r => r.section !== 'parked')
+  const parked = tab === 'waiting' ? all.filter(r => r.section === 'parked') : []
   const top = tab === 'waiting' ? el(WaitingNote, { note }) : null
+  const area = parked.length ? el(ParkedArea, { onUnpark: unpark, rows: parked }) : null
   if (!mine.length) {
     return el('div', { style: S.col(8), 'data-test': 'empty' },
       top,
       el(EmptyState, { title: EMPTY[tab] }),
-      tab === 'waiting' && blocked ? el('div', { style: { display: 'flex', justifyContent: 'center' } }, el(Button, { onClick: () => setTab('blocked'), size: 'sm', variant: 'secondary' }, 'Show blocked')) : null)
+      tab === 'waiting' && blocked ? el('div', { style: { display: 'flex', justifyContent: 'center' } }, el(Button, { onClick: () => setTab('blocked'), size: 'sm', variant: 'secondary' }, 'Show blocked')) : null,
+      area)
   }
-  return el('div', { style: S.col(10) }, top, ...mine.map(r => el(Row, { key: r.id, onMerge, row: r })))
+  return el('div', { style: S.col(10) }, top, ...mine.map(r => el(Row, { key: r.id, canComment, canMerge, onMerge, onPark, row: r, you })), area)
 }
 
 // Every repo Hermes' account sees, one line each. A badge only for what differs from the usual
@@ -543,7 +815,7 @@ function Header({ data, updatedAt, onRefresh, refreshing }) {
     el('div', { style: S.row(10) },
       el(Mark, { size: 22 }),
       el('div', { style: S.col(2) },
-        el('div', { className: 'text-base font-semibold', style: { color: T.primary } }, 'Forgejo desk'),
+        el('div', { className: 'text-base font-semibold', style: { color: T.primary } }, 'Forgebrücke'),
         el('div', { style: S.small }, [forge, age].filter(Boolean).join(' · ')))),
     el(Button, { disabled: refreshing, onClick: onRefresh, size: 'sm', variant: 'secondary' }, el(Codicon, { name: 'refresh', size: '0.75rem', spinning: refreshing }), 'Refresh'))
 }
@@ -576,6 +848,7 @@ function DeskBody() {
   const profile = useProfile()
   const [tab, setTab] = useState('waiting')
   const [merging, setMerging] = useState(null)
+  const [parking, setParking] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
   const data = desk.data
   const refresh = async () => {
@@ -609,12 +882,14 @@ function DeskBody() {
         sizing: 'content',
         value: tab
       }),
+      el(VersionNote, { version: data.version }),
       data.forge_error ? el('div', { style: { ...S.small, color: T.yellow }, 'data-test': 'forge-error' }, data.forge_error) : null,
       el(Notes, { notes: data.notes }),
-      tab === 'repos' ? el(Repos, { error: data.repos_error, forgeUrl: data.forge_url, onRetry: refresh, repos }) : el(RowList, { blocked: counts.blocked > 0, note: data.waiting_note, onMerge: setMerging, rows: data.rows || [], setTab, tab }),
-      merging ? el(MergeDialog, { onClose: () => setMerging(null), row: merging }) : null)
+      tab === 'repos' ? el(Repos, { error: data.repos_error, forgeUrl: data.forge_url, onRetry: refresh, repos }) : el(RowList, { blocked: counts.blocked > 0, canComment: Boolean(data.can_comment), canMerge: Boolean(data.can_merge), note: data.waiting_note, onMerge: setMerging, onPark: setParking, rows: data.rows || [], setTab, tab, you: data.you }),
+      merging ? el(MergeDialog, { onClose: () => setMerging(null), row: merging }) : null,
+      parking ? el(ParkDialog, { canComment: Boolean(data.can_comment), onClose: () => setParking(null), row: parking, you: data.you }) : null)
   }
-  return el('div', { style: { ...S.col(16), padding: 20, maxWidth: 900 } },
+  return el('div', { style: { ...S.col(16), padding: 20 } },
     el(Header, { data: data && data.ok !== false ? data : null, onRefresh: refresh, refreshing, updatedAt: desk.dataUpdatedAt }), body)
 }
 
@@ -666,17 +941,21 @@ function TwoPlaceNote() {
 
 const BADGE = { setup: ['warn', 'setup needed'], preview: ['outline', 'preview only'], ready: ['success', 'ready'], unchecked: ['warn', 'not checked'] }
 const STEP_ICON = { done: ['pass-filled', T.green], todo: ['circle-large-outline', T.accent], problem: ['error', T.red], unchecked: ['warning', T.yellow], optional: ['circle-large-outline', T.tertiary] }
-const WRITE_CONFIRM = 'Hermes will send comments, pull requests and checks. You approve each one in the chat; flows and review requests run on their own.'
+const WRITE_CONFIRM = 'Hermes will send comments, pull requests and checks. Each follows Hermes’ approval setting; flows and review requests run on their own.'
 const SWITCHES = [
   ['review_every_pr', 'Ask me to review every pull request', 'Also for pull requests opened by others.'],
   ['learn_mode', 'Learn mode', 'Short Git lessons at your first milestones.'],
   ['audit_enabled', 'Security audit', 'Read-only check of branch protection and keys.']
 ]
+// His words for rules 2 and 3 (0.0.19 review). Rule 2's warning is the write token's risk sentence too
+// (capabilities.OWNER_RISK); tests/test_v0021_copy.py holds the two equal.
 const RULES = [
-  ['person', 'Hermes has its own account', 'Everything it writes is signed by that account, never by you.'],
-  ['eye', 'Forgejo decides its access', 'Per repo you give its account Read or Write in Forgejo. Nothing else grants access.'],
-  ['pass', 'You approve every write', 'Each comment, pull request or check asks you first. Nothing approves or merges main.'],
-  ['key', 'Tokens stay narrow', 'Tokens live on the Hermes host, where any agent shell can read them. Mint each with the fewest scopes.']
+  ['person', 'Hermes has its own account', ['Everything it writes is signed by that account, never by you.']],
+  ['eye', 'Forgejo decides what Hermes may do', ['Per repo you give Hermes’ account Read or Write in Forgejo.', 'That right is the only permission layer.',
+    'Warning though: If you set the personal write token below,', 'it is also exposed to Hermes, ultimately giving Hermes full access to your account.']],
+  ['pass', 'You approve the important part', ['Hermes works on its own feature branches.', 'Nothing gets to main unless you approve.',
+    'For additional security, set up a branch protection for main and whitelist only yourself for push and merge.']],
+  ['key', 'Tokens stay narrow', ['Tokens live on the Hermes host, where any agent shell can read them.', 'Mint each with the fewest scopes.']]
 ]
 
 function Scopes({ list }) {
@@ -772,7 +1051,13 @@ function Switches({ s, onWrite }) {
 }
 
 // Working features are names only. An off one says how to switch it on; the rest sit behind one line.
-function Features({ features }) {
+function Background({ b }) {
+  if (!b || !b.text) return null
+  return el('div', { style: { ...S.line(6), ...S.text, color: T.yellow, alignItems: 'flex-start', flexWrap: 'wrap' }, 'data-test': 'background' },
+    el(Codicon, { name: 'warning', size: '0.8rem', style: { marginTop: 2 } }), b.text + ' ' + (b.fix || ''))
+}
+
+function Features({ features, background }) {
   const [open, setOpen] = useState(false)
   const by = status => features.filter(f => f.status === status)
   const [works, off, dark] = [by('available'), by('off'), by('dark')]
@@ -780,6 +1065,7 @@ function Features({ features }) {
     el(Badge, { variant: 'muted' }, f.label), el('span', { style: { minWidth: 0 } }, f.reason))
   return el('section', { style: S.col(8), 'data-test': 'features' },
     el(Heading, {}, 'What works'),
+    el(Background, { b: background }),
     works.length
       ? el('div', { style: S.row(4), 'data-test': 'works' }, ...works.map(f => el(Badge, { key: f.id, variant: 'success', 'data-test': 'feature', 'data-status': f.status }, f.label)))
       : el('div', { style: S.text }, 'Nothing yet.'),
@@ -806,6 +1092,16 @@ function Arrow({ label, toward }) {
     el('div', { style: { display: 'flex', alignItems: 'center', gap: 2 } }, toward === 'right' ? shaft : head, toward === 'right' ? head : shaft))
 }
 
+// With Security audit on, the backend lists repos whose default branch has no protection rule (rule 3).
+function Unprotected({ list }) {
+  if (!list.length) return null
+  return el('div', { style: S.col(2), 'data-test': 'unprotected' },
+    ...list.map(u => el('div', { key: u.repo, style: { ...S.line(6), ...S.text, color: T.yellow, alignItems: 'flex-start' } },
+      el(Codicon, { name: 'warning', size: '0.8rem', style: { marginTop: 2 } }),
+      el('span', { style: { minWidth: 0 } }, u.branch + ' is not protected in ', el('span', { style: { whiteSpace: 'nowrap' } }, u.repo + '.'), ' ',
+        el('button', { className: 'fb-link', onClick: () => openExternal(u.url), style: { color: T.accent, whiteSpace: 'nowrap' }, type: 'button' }, 'Branch settings')))))
+}
+
 function HowItWorks({ s, startOpen }) {
   const [open, setOpen] = useState(startOpen)
   const bot = (s.tokens || []).find(t => t.role === 'bot')
@@ -822,9 +1118,11 @@ function HowItWorks({ s, startOpen }) {
         el(Node, { icon: 'hubot', title: 'Hermes', caption: bot && bot.login ? '@' + bot.login : 'own account' }))
       : null,
     open
-      ? el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '6px 14px' }, 'data-test': 'rules' },
-        ...RULES.map(([icon, label, long]) => el(Tip, { key: icon, label: long },
-          el('span', { style: { ...S.line(6), fontSize: '0.75rem', color: T.primary }, title: long }, el(Codicon, { name: icon, size: '0.85rem', style: { color: T.accent } }), label))))
+      ? el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(16rem, 1fr))', gap: '12px 18px' }, 'data-test': 'rules' },
+        ...RULES.map(([icon, label, long]) => el('div', { key: icon, style: S.col(3), 'data-test': 'rule', 'data-rule': icon },
+          el('span', { style: { ...S.line(6), fontSize: '0.75rem', fontWeight: 600, color: T.primary } }, el(Codicon, { name: icon, size: '0.85rem', style: { color: T.accent } }), label),
+          el('span', { style: S.text }, long.join(' ')),
+          icon === 'pass' ? el(Unprotected, { list: s.unprotected || [] }) : null)))
       : null)
 }
 
@@ -844,6 +1142,29 @@ function AgentReviews({ s }) {
     answer ? el('div', { style: { ...S.text, color: answer.ok ? T.green : T.yellow } }, answer.message, answer.command ? el('div', { style: { ...S.mono, color: T.primary } }, answer.command) : null) : null)
 }
 
+// A token saved after this profile's plugin host started is unseen until the host restarts (the backend
+// reads the .env's time against its own start). One click restarts it; Hermes starts a new one at once.
+function Reload({ reload, onDone }) {
+  const [busy, setBusy] = useState(false)
+  if (!reload || !reload.needed) return null
+  const run = async () => {
+    setBusy(true)
+    try {
+      const out = await rest('/reload-tokens', { method: 'POST', body: {} })
+      host.notify({ kind: 'success', message: (out && out.message) || 'Reloading.' })
+      await sleep(2000)
+      await onDone()
+    } catch (error) {
+      host.notify({ kind: 'error', message: 'Not reloaded: ' + error.message })
+    } finally {
+      setBusy(false)
+    }
+  }
+  return el('div', { style: { ...S.card, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }, 'data-test': 'reload' },
+    el('div', { style: S.line(8) }, el(Codicon, { name: 'key', size: '0.85rem', style: { color: T.yellow } }), el('span', { style: { fontSize: '0.8125rem', color: T.primary } }, reload.text)),
+    el(Button, { disabled: busy, onClick: run, size: 'xs', 'data-test': 'reload-tokens' }, 'Load it now'))
+}
+
 function SettingsBody() {
   const q = useSettings()
   const save = useSaveSetting()
@@ -857,24 +1178,26 @@ function SettingsBody() {
       host.notify({ kind: 'error', message: 'Refresh failed: ' + error.message })
     }
   }
-  if (q.isLoading) return el('div', { style: { padding: 20, maxWidth: 720 } }, el(Loading, { text: 'Reading your setup.' }))
+  if (q.isLoading) return el('div', { style: { padding: 20 } }, el(Loading, { text: 'Reading your setup.' }))
   if (q.isError) return el(Problem, { action: 'Try again', onAction: () => q.refetch(), text: q.error.message, title: 'The settings could not load' })
   const s = q.data || {}
   if (s.ok === false) return el(Refused, { data: s, onRetry: retry, title: 'The settings could not load' })
   const [variant, word] = BADGE[s.state] || BADGE.setup
   const flows = (s.features || []).find(f => f.id === 'flows')
   const askToWrite = () => setConfirming(true)
-  return el('div', { style: { ...S.col(22), padding: 20, maxWidth: 720 } },
+  return el('div', { style: { ...S.col(22), padding: 20 } },
     el('div', { style: { ...S.row(10), justifyContent: 'space-between' } },
       el('div', { style: S.row(10) }, el(Mark, { size: 22 }),
         el('div', { className: 'text-base font-semibold', style: { color: T.primary } }, 'Forgebrücke'),
         el(Badge, { variant, 'data-test': 'ready' }, word)),
       el(Button, { onClick: openFields, size: 'xs', variant: 'secondary' }, el(Codicon, { name: 'settings-gear', size: '0.75rem' }), 'Open settings')),
+    el(VersionNote, { version: s.version }),
+    el(Reload, { reload: s.reload, onDone: retry }),
     el(Next, { s, onRetry: retry, onWrite: askToWrite }),
     el(Setup, { s, onRetry: retry }),
     el(Switches, { s, onWrite: askToWrite }),
-    el(Features, { features: s.features || [] }),
-    el(HowItWorks, { s, startOpen: s.state === 'setup' }),
+    el(Features, { background: s.background, features: s.features || [] }),
+    el(HowItWorks, { s, startOpen: s.state === 'setup' || Boolean(s.unprotected && s.unprotected.length) }),
     flows && flows.status === 'available' ? el(AgentReviews, { s }) : null,
     el(TwoPlaceNote, {}),
     confirming
@@ -925,7 +1248,7 @@ export default {
     ctx.register({
       id: 'open',
       area: PALETTE_AREA,
-      data: { id: 'forgebruecke.open', label: 'Open Forgejo desk', keywords: ['forgejo', 'merge', 'pull request', 'review'], run: () => host.navigate(PATH) }
+      data: { id: 'forgebruecke.open', label: 'Open Forgebrücke', keywords: ['forgejo', 'desk', 'merge', 'pull request', 'review'], run: () => host.navigate(PATH) }
     })
     if (typeof ctx.registerSettingsPage === 'function') {
       ctx.registerSettingsPage({ id: 'setup', title: 'Forgebrücke', icon: 'repo-forked', order: 50, render: () => jsx(SettingsPage, {}) })

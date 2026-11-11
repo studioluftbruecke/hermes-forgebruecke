@@ -228,7 +228,7 @@ def run_doctor(settings, creds, *, client_factory: Callable[[str, str], Any], ch
         report["tokens"].append(owner)
     else:
         report["tokens"].append({"role": "owner", "env": env.OWNER_TOKEN_ENV, "set": False,
-                                 "note": "Optional. Only for the desk's Merge button."})
+                                 "note": "Optional. Only for the desk's Merge and Comment buttons."})
     reports = {k: v for k, v in (("bot", bot), ("owner", owner)) if v is not None}
     report["features"], warnings, found = features(reports, settings, caps, channel)
     report["token_warnings"] = problems + warnings

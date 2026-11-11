@@ -30,6 +30,7 @@ import asyncio
 import importlib
 import json
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -44,6 +45,8 @@ from gateway.platforms.event import MessageEvent, MessageType
 logger = logging.getLogger(__name__)
 PKG = __package__.rpartition(".")[0]
 DELIVERY_TRIES = 3  # a mention Hermes refuses this often is marked and left alone
+UPDATE_PENDING = "channel-update-pending.json"  # in the data folder; the settings page reads it
+PLUGIN_YAML = Path(__file__).resolve().parents[1] / "plugin.yaml"
 
 
 def _mod(name: str):
@@ -79,6 +82,7 @@ class ForgejoMentionAdapter(BasePlatformAdapter):
         self._failed: dict = {}  # mention key -> deliveries that raised
         self._handed: set = set()  # keys whose hand-off is over while their ledger entry is not on disk yet
         self._dry_seen: set = set()  # keys the last dry-run poll recorded; the next poll finds them again
+        self._version = self._loaded_version()  # the code this adapter was built from
         extra = config.extra if isinstance(getattr(config, "extra", None), dict) else {}
         if not isinstance(getattr(config, "extra", None), dict):
             config.extra = extra
@@ -123,6 +127,46 @@ class ForgejoMentionAdapter(BasePlatformAdapter):
         except (TypeError, ValueError, IndexError, OverflowError):
             return self._now()
 
+    # -- version skew ----------------------------------------------------------------------------
+    # The gateway keeps an adapter alive across `plugins update`, so its own methods are the old code while
+    # `_mod` can hand it newer modules (measured on a server: a 0.0.17 adapter met the 0.0.19 poller and failed
+    # every poll). Each poll compares the version it was built from with the loaded modules and the copy on
+    # disk; on a mismatch it stops and says how to finish the update, instead of failing every 30 s.
+
+    def _loaded_version(self) -> str:
+        try:
+            return str(_mod("version").VERSION)
+        except Exception:
+            return ""
+
+    def _disk_version(self) -> str:
+        try:
+            found = re.search(r'^version:\s*"?([^"\s]+)"?', PLUGIN_YAML.read_text(encoding="utf-8"), re.M)
+        except OSError:
+            return ""
+        return found.group(1) if found else ""
+
+    def _skew(self) -> Optional[str]:
+        """The newer version found, when the loaded modules or the copy on disk are not this adapter's."""
+        for found in (self._loaded_version(), self._disk_version()):
+            if found and self._version and found != self._version:
+                return found
+        return None
+
+    def _stop_for_update(self, found: str) -> None:
+        message = (f"Forgebrücke {found} is installed, but the mention channel still runs {self._version}. "
+                   "Restart the gateway to finish the update.")
+        self._event("update_pending", running=self._version, found=found, message=message)
+        if self._state_dir is not None:
+            try:
+                self._state_dir.mkdir(parents=True, exist_ok=True)
+                (self._state_dir / UPDATE_PENDING).write_text(json.dumps(
+                    {"at": time.time(), "running": self._version, "found": found, "message": message}), encoding="utf-8")
+            except OSError:
+                pass
+        self._alive = False
+        self._mark_disconnected()
+
     # -- lifecycle -------------------------------------------------------------------------------
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -155,6 +199,11 @@ class ForgejoMentionAdapter(BasePlatformAdapter):
             ledger.since = poller.iso(self._forge_now(me))
             ledger.save(self.ledger_path)
         self._take_lease()
+        if self._state_dir is not None:  # this adapter runs the current code: an older one's note is void
+            try:
+                (self._state_dir / UPDATE_PENDING).unlink()
+            except OSError:
+                pass
         self._alive = True
         self._running = True
         self._task = asyncio.create_task(self._loop())
@@ -197,6 +246,10 @@ class ForgejoMentionAdapter(BasePlatformAdapter):
                     self._event("stop", reason="a newer adapter holds the lease")
                     self._alive = False
                     self._mark_disconnected()
+                    return
+                found = self._skew()
+                if found:
+                    self._stop_for_update(found)
                     return
                 config = self._config()
                 if not _mod("profile").enabled_in(config):

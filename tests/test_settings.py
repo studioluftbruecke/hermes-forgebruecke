@@ -18,7 +18,7 @@ def test_defaults_are_dry_run_with_mentions_on_and_no_flows():
     s = settings.load_settings(getter({}))
     assert s.warnings == ()
     assert s.dry_run is True and s.audit_enabled is False and s.learn_mode is False
-    assert s.you == "" and s.poll_interval == 120
+    assert s.you == "" and s.poll_interval == 30
     rule = s.rule_for("acme/anything")
     assert (rule.mentions, rule.flows, rule.targets) == (True, (), ())
     assert not hasattr(rule, "write") and not hasattr(s, "read_scope") and not hasattr(s, "badge_meaning")
@@ -44,8 +44,8 @@ def test_poll_interval_is_clamped_or_defaulted():
     assert settings.load_settings(getter({"poll_interval": 5})).poll_interval == 30
     assert settings.load_settings(getter({"poll_interval": 99999})).poll_interval == 3600
     s = settings.load_settings(getter({"poll_interval": "often"}))
-    assert s.poll_interval == 120 and "poll_interval" in s.warnings[0]
-    assert settings.load_settings(getter({"poll_interval": True})).poll_interval == 120
+    assert s.poll_interval == 30 and "poll_interval" in s.warnings[0]
+    assert settings.load_settings(getter({"poll_interval": True})).poll_interval == 30
 
 
 def test_rules_parse_and_match_case_insensitively():
@@ -115,7 +115,7 @@ def test_an_address_with_a_user_name_or_password_is_refused_and_never_shown():
 
 def test_load_settings_never_raises_on_values_yaml_can_produce():
     s = settings.load_settings(getter({"poll_interval": float("inf")}))
-    assert s.poll_interval == 120 and "poll_interval" in s.warnings[0]
+    assert s.poll_interval == 30 and "poll_interval" in s.warnings[0]
     s = settings.load_settings(getter({"writes": [{"repo_glob": "a/b", "flows": ["demo"], True: 1, 7: 2}]}))
     assert s.explicit_rule("a/b").flows == ("demo",) and "unknown keys 7, True ignored" in s.warnings[0]
 
@@ -205,8 +205,10 @@ def test_the_manifest_drops_the_retired_fields_adds_you_and_says_the_write_token
     assert "you" in keys and not {"read_token", "read_scope", "badge_meaning"} & set(keys)
     assert "PERSONAL_READ_TOKEN" not in manifest
     owner = manifest.split("  owner_token:")[1].split("\n  poll_interval:")[0]
-    assert "any agent shell on this host can read it and could merge into main as you" in owner
+    assert "; it is also exposed to Hermes, ultimately giving Hermes full access to your account." in owner
     owner_row = next(t for t in sub("capabilities").TOKENS if t["role"] == "owner")
-    assert "could merge into main as you" in owner_row["risk"]
-    assert re.search(r'^version: "0\.0\.20"$', manifest, re.M)
-    assert '"version": "0.0.20"' in (ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8")
+    assert "full access to your account" in owner_row["risk"]
+    version = sub("version").VERSION
+    assert version == "0.0.21"
+    assert re.search(r'^version: "' + re.escape(version) + '"$', manifest, re.M)
+    assert '"version": "' + version + '"' in (ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8")

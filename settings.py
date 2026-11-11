@@ -18,7 +18,7 @@ Shapes:
   ``review_every_pr`` (on by default) the flows tick asks him on every other open pull request too, and
   the desk lists one that does not ask him yet (``review_requests.py``).
 - ``Credentials(token, owner_token)``: the agent account's token (required) and an optional write token
-  of the user's own account (only the desk's Merge button, on his click). Their ``repr`` never
+  of the user's own account (only the desk's Merge and Comment buttons, on his click). Their ``repr`` never
   shows a value, and nothing in this plugin logs them. A token with a space, a line break or a
   non-ASCII character counts as unset, and ``problems()`` says which field to enter again. Which token a
   call uses is decided by its lane (``access.py``), not by the caller.
@@ -54,7 +54,7 @@ _REPO_GLOB_RE = re.compile(r"^[A-Za-z0-9_.*?\[\]-]+/[A-Za-z0-9_.*?\[\]-]+$")
 DEFAULTS: dict = {
     "url": "",
     "you": "",
-    "poll_interval": 120,
+    "poll_interval": 30,
     "mention_authors": [],
     "writes": [],
     "flows_path": ".forgebruecke/flows.yml",
@@ -88,7 +88,7 @@ class Rule:
 class Settings:
     url: str = ""
     you: str = ""
-    poll_interval: int = 120
+    poll_interval: int = 30
     mention_authors: tuple = ()
     writes: tuple = ()
     flows_path: str = ".forgebruecke/flows.yml"

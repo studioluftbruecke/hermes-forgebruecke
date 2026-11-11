@@ -148,6 +148,13 @@ def find_mentions(client, *, bot: str, settings, ledger: Ledger, now: float,
     author has write access to that repo (``access.author_can_write``) and is not Hermes' own account;
     ``mention_authors``, when set, narrows that further."""
     acc = _access()
+    # A gateway that outlived an update can hand this code a ledger object built by an older copy of the
+    # plugin (0.0.17's had no overlap_due and a two-argument rate_ok). Read its fields into a Ledger of this
+    # version; the cursor is written back onto the object the caller passed.
+    given = ledger
+    if not isinstance(ledger, Ledger):
+        ledger = Ledger({k: getattr(given, k) for k in ("since", "seen_at", "overlap_due", "answered", "replies")
+                         if hasattr(given, k)})
     cursor = parse_ts(ledger.since) if ledger.since else now
     # The stretch before the cursor is read again on the poll after the cursor moved, and on every poll in the
     # OVERLAP_S after that: the forge can show a comment late. A poll interval longer than OVERLAP_S still gets
@@ -214,8 +221,8 @@ def find_mentions(client, *, bot: str, settings, ledger: Ledger, now: float,
                                  bool(issue.get("pull_request")), issue.get("title") or ""))
     moved = newest > cursor or not ledger.seen_at
     if moved:
-        ledger.since, ledger.seen_at = iso(max(newest, cursor)), now
-    ledger.overlap_due = moved
+        given.since, given.seen_at = iso(max(newest, cursor)), now
+    given.overlap_due = moved
     return found
 
 

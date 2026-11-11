@@ -6,7 +6,7 @@ from fb_fakes import BASE, DEMO, HEAD_SHA, DictState, sub
 from fb_fakes_tools_read import kit, mention, plugin
 
 read_mod, state_mod = sub("tools.read"), sub("flows.state")
-ROW_KEYS = {"tab", "repo", "number", "title", "state", "url"}
+ROW_KEYS = {"tab", "section", "repo", "number", "title", "state", "url"}
 
 
 def flow_pr(n, *states):
@@ -29,10 +29,10 @@ def desk(tmp_path, settings=None, lane=None, data_dir=True):
 
 def test_one_call_says_what_waits_runs_and_is_blocked(tmp_path):
     out, _ = desk(tmp_path)
-    assert out["ok"] and out["you"] == "acme" and out["counts"] == {"waiting": 1, "running": 1, "blocked": 1}
+    assert out["ok"] and out["you"] == "acme" and out["counts"] == {"waiting": 1, "parked": 0, "running": 1, "blocked": 1}
     assert all(set(row) == ROW_KEYS for row in out["rows"])
     rows = {row["number"]: row for row in out["rows"]}
-    assert rows[3] == {"tab": "waiting", "repo": DEMO, "number": 3, "title": "Fix calc.mul",
+    assert rows[3] == {"tab": "waiting", "section": "now", "repo": DEMO, "number": 3, "title": "Fix calc.mul",
                        "state": "Check devops/review failed.", "url": f"{BASE}/{DEMO}/pulls/3"}
     assert (rows[7]["tab"], rows[8]["tab"]) == ("running", "blocked") and rows[7]["state"] == "Check devops/review failed."
     assert [row["tab"] for row in out["rows"]] == ["waiting", "running", "blocked"]
@@ -86,6 +86,6 @@ def test_the_cli_prints_one_line_per_row(tmp_path, capsys):
 def test_the_cli_prints_the_same_answer_as_json_and_refuses_a_mention_turn(tmp_path, capsys):
     code, text = cli(tmp_path, capsys, json=True)
     out = json.loads(text)
-    assert code == 0 and out["counts"] == {"waiting": 1, "running": 1, "blocked": 0} and len(out["rows"]) == 2
+    assert code == 0 and out["counts"] == {"waiting": 1, "parked": 0, "running": 1, "blocked": 0} and len(out["rows"]) == 2
     code, text = cli(tmp_path, capsys, factory={"lane_fn": mention(DEMO).lane})
     assert code == 1 and "may read only" in text

@@ -80,9 +80,15 @@ def test_the_stretch_before_the_cursor_is_read_once_more_and_then_an_idle_forge_
     f.list_thread(1, T0 + 10)
     assert f.poll(T0 + 11) == [900]
     assert f.poll(T0 + 11 + DEFAULT_INTERVAL) == []
+    # The default interval (30 s since 0.0.21) is shorter than the overlap: polls inside OVERLAP_S after the move
+    # read the stretch again; once it ran out, an idle forge costs no thread read.
+    t = T0 + 11 + DEFAULT_INTERVAL
+    while t - (T0 + 11) < poller.OVERLAP_S:
+        t += DEFAULT_INTERVAL
+        assert f.poll(t) == []
     after_the_reread = f.thread_reads()
-    for i in range(2, 6):
-        assert f.poll(T0 + 11 + DEFAULT_INTERVAL * i) == []
+    for i in range(1, 5):
+        assert f.poll(t + DEFAULT_INTERVAL * i) == []
     assert f.thread_reads() == after_the_reread
 
 

@@ -128,6 +128,6 @@ def test_the_terminal_report_says_not_available_and_names_no_internal_word():
     lines = text.splitlines()
     assert "[not available]" in text and "dark" not in text and "light" not in text and "swagger" not in text
     assert any(line.startswith("  Hermes' token: forgebruecke-bot, 1 repo") for line in lines)
-    assert "  Your write token: not set. Optional. Only for the desk's Merge button." in lines
+    assert "  Your write token: not set. Optional. Only for the desk's Merge and Comment buttons." in lines
     assert lines[-1] == ("  next: Hermes' token lacks read:notification, write:issue and write:repository. "
                          "Replace it with one that has them.")

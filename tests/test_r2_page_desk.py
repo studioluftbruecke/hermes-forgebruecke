@@ -122,7 +122,7 @@ def merge_writes(f):
 def test_a_flow_row_that_waits_for_someone_else_is_not_under_waiting_for_me(tmp_path):
     body = read(tmp_path, forge(), pr_state(3, human="waiting for bob to merge in Forgejo"), tokens=BOTH)
     row = body["rows"][0]
-    assert row["tab"] == "running" and body["counts"] == {"waiting": 0, "running": 1, "blocked": 0}
+    assert row["tab"] == "running" and body["counts"] == {"waiting": 0, "parked": 0, "running": 1, "blocked": 0}
     assert body["label"] == "Forgejo"
     assert row["summary"] == {"tone": "wait", "text": "Every gate passed. Waiting for bob to merge."}
     assert row["waiting_on"] == "bob" and row["can_merge"] is False and row["next"] == "open_in_forgejo"
@@ -189,9 +189,11 @@ def test_rows_that_are_not_my_move_open_forgejo(tmp_path):
 
 
 def test_the_row_draws_the_backends_move_and_merge_is_second_on_a_review_row():
-    row = SOURCE[SOURCE.index("const MOVE = {"):SOURCE.index("const EMPTY")]
-    assert set(re.findall(r"^  (\w+): ", row, re.M)) == set(desk.MOVES)
-    assert "MOVE[row.next]" in row and "row.tab === 'waiting'" not in row and "row.flow" not in row
+    row = SOURCE[SOURCE.index("const MOVE = {"):SOURCE.index("// ── the parking area")]
+    moves = SOURCE[SOURCE.index("const MOVE = {"):SOURCE.index("}", SOURCE.index("const MOVE = {"))]
+    assert set(re.findall(r"^  (\w+): ", moves, re.M)) == set(desk.MOVES)
+    main = row[row.index("  const main = "):row.index("  const comment = ")]  # the main button: the backend's move only
+    assert "MOVE[row.next]" in main and "row.tab" not in main and "row.flow" not in row
     assert "row.can_merge && row.next !== 'merge'" in row
 
 
@@ -279,7 +281,7 @@ def test_a_failed_gates_reason_keeps_its_own_end_mark(detail, text):
 def test_a_repo_name_in_another_case_is_still_one_pull_request(tmp_path):
     body = read(tmp_path, forge(), pr_state(3, ("failed", "pending", "pending"), repo="Acme/Forgebruecke-Demo"))
     assert [(r["number"], r["tab"]) for r in body["rows"]] == [(3, "blocked")]
-    assert body["counts"] == {"waiting": 0, "running": 0, "blocked": 1} and body["rows"][0]["mergeable"] is True
+    assert body["counts"] == {"waiting": 0, "parked": 0, "running": 0, "blocked": 1} and body["rows"][0]["mergeable"] is True
 
 
 def test_a_comment_without_an_author_is_drawn_with_a_word(tmp_path):
@@ -296,7 +298,7 @@ def test_an_install_without_a_data_folder_still_shows_what_forgejo_knows():
     values = {"url": BASE, "you": "acme"}
     body = desk.api_desk(lambda k, d=None: values.get(k, d), {"FORGEBRUECKE_BOT_ACCOUNT_TOKEN": BOT}.get,
                          data_dir=None, transport=forge(), now=Clock())[1]
-    assert body["ok"] and body["counts"] == {"waiting": 1, "running": 0, "blocked": 0}
+    assert body["ok"] and body["counts"] == {"waiting": 1, "parked": 0, "running": 0, "blocked": 0}
     assert body["rows"][0]["reason"] == "review requested" and body["engine"]["age_s"] is None
 
 

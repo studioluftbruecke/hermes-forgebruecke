@@ -415,13 +415,18 @@ def _whose(access, client, flags: list) -> dict:
 def desk_as_text(desk: dict, *, repo: str = "", page: int = 1, limit: int = DESK_ROWS) -> dict:
     """The desk's build (``desk.build_desk``) as what an answer needs: one page of rows, a pull request each
     with its state in words, the counts per tab, and what is missing. ``repo`` keeps that repo's rows only."""
-    rows = [{"tab": r.get("tab"), "repo": r.get("repo"), "number": r.get("number"), "title": r.get("title"),
-             "state": (r.get("summary") or {}).get("text") or r.get("reason") or r.get("flow"), "url": r.get("url")}
+    rows = [lean({"tab": r.get("tab"), "section": r.get("section") or "now", "repo": r.get("repo"),
+                  "number": r.get("number"), "title": r.get("title"),
+                  "state": (r.get("summary") or {}).get("text") or r.get("reason") or r.get("flow"), "url": r.get("url"),
+                  "parked_note": (r.get("parked") or {}).get("note") or None, "back": (r.get("back") or {}).get("text")})
             for r in desk.get("rows") or []]
     counts = desk.get("counts")
     if repo:
         rows = [r for r in rows if str(r["repo"] or "").lower() == repo.lower()]
-        counts = {tab: sum(1 for r in rows if r["tab"] == tab) for tab in counts or {}}
+        counts = {"waiting": sum(1 for r in rows if r["tab"] == "waiting" and r["section"] == "now"),
+                  "parked": sum(1 for r in rows if r["section"] == "parked"),
+                  "running": sum(1 for r in rows if r["tab"] == "running"),
+                  "blocked": sum(1 for r in rows if r["tab"] == "blocked")}
     notes = [*(desk.get("notes") or []), desk.get("forge_error")]
     if not desk.get("you"):
         guess = (desk.get("waiting_note") or {}).get("suggestion")
@@ -443,17 +448,21 @@ def read_desk(access, data_dir: Any, *, repo: str = "", page: int = 1, limit: in
         raise _mod("access").Refusal("no_state", "The desk cannot be read in this run. List pull requests with "
                                                  "kind=prs instead.")
     store = _mod("flows.state").FlowStore(data_dir)
-    return desk_as_text(_mod("desk").build_desk(access, store, can_merge=False), repo=repo, page=page, limit=limit)
+    return desk_as_text(_mod("desk").build_desk(access, store, can_merge=False, data_dir=data_dir), repo=repo,
+                        page=page, limit=limit)
 
 
 def format_desk(out: dict) -> str:
     """``read_desk``'s answer as plain lines for the CLI: the counts, then one line per pull request."""
     counts = out.get("counts") or {}
     who = f" for {out['you']}" if out.get("you") else ""
-    tabs = ("waiting", "running", "blocked")
-    lines = [f"Forgejo desk{who}: " + ", ".join(f"{counts.get(tab, 0)} {tab}" for tab in tabs)]
+    parked = f" ({counts['parked']} parked)" if counts.get("parked") else ""
+    lines = [f"Forgejo desk{who}: {counts.get('waiting', 0)} waiting{parked}, {counts.get('running', 0)} running, "
+             f"{counts.get('blocked', 0)} blocked"]
     for r in out.get("rows") or []:
-        lines.append(f"{r['tab']:<8} {r['repo']}#{r['number']}  {r['title']}  [{r.get('state', '')}]  "
+        tab = "parked" if r.get("section") == "parked" else r["tab"]
+        extra = "".join(f"  ({x})" for x in (r.get("back"), r.get("parked_note") and "note: " + r["parked_note"]) if x)
+        lines.append(f"{tab:<8} {r['repo']}#{r['number']}  {r['title']}  [{r.get('state', '')}]{extra}  "
                      f"{r.get('url', '')}".rstrip())
     lines += [f"note: {note}" for note in out.get("notes") or []]
     if out.get("has_more"):

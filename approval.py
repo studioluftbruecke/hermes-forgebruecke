@@ -384,8 +384,10 @@ _HERMES_CALL_RE = re.compile(r"\bhermes\b" + _HERMES_FLAGS + r"(?:config\s+(?:se
 _PROFILE_FLAG_RE = re.compile(r"(?:-p|--profile)(?:\s+|=)([\w.-]+)")
 _MENTION_TOOLS_RE = re.compile(r"--platform(?:\s+|=)" + MENTION_PLATFORM + r"\b")
 # The page's routes that change something on the user's click (dashboard/plugin_api.py): save a setting, merge
-# with the user's own token, create a reviewer profile. `/settings` and `/desk` only read.
-_PAGE_ROUTE_RE = re.compile(rf"/api/plugins/{PLUGIN_DIR}/(setting|merge|reviewer-profile)(?![\w-])")
+# or comment with the user's own token, create a reviewer profile, restart the profile's plugin host, park and
+# unpark a pull request. `/settings` and `/desk` only read.
+_PAGE_ROUTE_RE = re.compile(rf"/api/plugins/{PLUGIN_DIR}/"
+                            r"(setting|merge|comment|reviewer-profile|reload-tokens|park|unpark)(?![\w-])")
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
@@ -711,7 +713,11 @@ _WHAT = {
     "hermes": "changes Hermes settings through the hermes command",
     "setting": "saves a Forgebrücke setting through its page's route",
     "merge": "merges a pull request through Forgebrücke's page route, with your own token",
+    "comment": "posts a comment as you through Forgebrücke's page route, with your own token",
+    "park": "parks a pull request on Forgebrücke's desk through its page route",
+    "unpark": "brings a parked pull request back through Forgebrücke's page route",
     "reviewer-profile": "creates a reviewer profile through Forgebrücke's page route",
+    "reload-tokens": "restarts this profile's plugin host through Forgebrücke's page route",
     "holder": "runs a command that can change a folder that holds Forgebrücke's settings, data or code",
 }
 _HINTS = (PLUGIN_DIR, PLUGIN_ROOT.name.lower(), "plugin-data", "hermes", *_SETTINGS_FILES, *_SETTINGS_KEYS)

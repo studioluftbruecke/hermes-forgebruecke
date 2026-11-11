@@ -208,7 +208,12 @@ class FakeForgejo:
                 if not self._has(acct, "write:issue"):
                     return self._scope_error("write:issue")
                 self.writes.append((method, path, payload))
-                return self._json(201, {"id": 9000 + len(self.writes), "html_url": f"{BASE}/{full}/issues/{rest[1]}#c"})
+                cid = 9000 + len(self.writes)
+                posted = {"id": cid, "html_url": f"{BASE}/{full}/issues/{rest[1]}#c", "user": {"login": acct["user"]["login"]},
+                          "body": data.get("read_back_body", (payload or {}).get("body")),
+                          "created_at": "2026-11-08T13:30:00Z"}
+                data.setdefault("posted_comments", {})[cid] = posted
+                return self._json(201, {"id": cid, "html_url": posted["html_url"]})
             if method == "POST" and len(rest) == 3 and rest[0] == "pulls" and rest[2] in ("reviews", "requested_reviewers"):
                 if not self._has(acct, "write:repository"):
                     return self._scope_error("write:repository")
@@ -341,6 +346,9 @@ class FakeForgejo:
         if len(rest) == 2 and rest[0] == "issues":
             i = data.get("issues", {}).get(int(rest[1]))
             return self._json(200, i) if i else nf
+        if len(rest) == 3 and rest[:2] == ["issues", "comments"]:
+            c = data.get("posted_comments", {}).get(int(rest[2]))
+            return self._json(200, c) if c else nf
         if len(rest) == 3 and rest[0] == "issues" and rest[2] == "comments":
             since = query.get("since", "")
             cs = [c for c in data.get("comments", {}).get(int(rest[1]), [])

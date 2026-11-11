@@ -49,7 +49,9 @@ def test_a_home_that_cannot_be_read_still_guards_any_profiles_settings():
     assert guard(home=broken)(tool_name="terminal", args={"command": "ls -la && git status"}) is None
 
 
-@pytest.mark.parametrize("route, word", [("merge", "merges"), ("reviewer-profile", "reviewer profile")])
+@pytest.mark.parametrize("route, word", [("merge", "merges"), ("reviewer-profile", "reviewer profile"),
+                                         ("comment", "posts a comment as you"), ("park", "parks a pull request"),
+                                         ("unpark", "brings a parked pull request back")])
 def test_the_routes_that_merge_or_create_a_profile_ask(route, word):
     command = f"curl -s -X POST {BASE}/{route} -H 'Content-Type: application/json' -d '{{}}'"
     assert word in approval.settings_touch("terminal", {"command": command}, HOME)

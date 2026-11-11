@@ -96,7 +96,7 @@ def test_ask_hermes_drafts_a_reference_and_never_sends():
 
 
 def test_the_you_note_offers_the_login_in_one_click_and_the_repos_tab_follows_the_backend():
-    assert "el(RowList, { blocked: counts.blocked > 0, note: data.waiting_note" in SOURCE
+    assert "el(RowList, { blocked: counts.blocked > 0, canComment: Boolean(data.can_comment), canMerge: Boolean(data.can_merge), note: data.waiting_note" in SOURCE
     who = part("function WhoAreYou(", "function WaitingNote(")
     assert "save('you', login)" in who and "'Use @' + login" in who and "'Open settings'" in who
     repos = part("function Repos(", "function MergeDialog(")
@@ -151,8 +151,8 @@ def test_switches_save_through_the_setting_route_and_writing_asks_once():
     assert "value ? onWrite() : save('dry_run', true)" in switches and "ToggleRow" in switches
     assert {key for key in re.findall(r"\['(\w+)', '[^']+', '[^']+'\]", part("const SWITCHES", "const RULES"))} == {
         "review_every_pr", "learn_mode", "audit_enabled"}
-    assert ("const WRITE_CONFIRM = 'Hermes will send comments, pull requests and checks. You approve each one in the "
-            "chat; flows and review requests run on their own.'") in SOURCE
+    assert ("const WRITE_CONFIRM = 'Hermes will send comments, pull requests and checks. Each follows Hermes’ approval "
+            "setting; flows and review requests run on their own.'") in SOURCE
     assert "onConfirm: () => save('dry_run', false, true)" in SOURCE
     assert set(re.findall(r"save\('(\w+)'", SOURCE)) | {"review_every_pr", "learn_mode", "audit_enabled"} == set(
         sub("desk").SETTABLE)
@@ -174,8 +174,10 @@ def test_text_is_short_and_carries_no_long_dash_or_plan_id():
     for _key, label, description in re.findall(r"\['(\w+)', '([^']+)', '([^']+)'\]", part("const SWITCHES", "const RULES")):
         assert len(description.split()) <= 10, label
     assert len("When off, Hermes only previews each write.".split()) <= 10 and "'When off, Hermes only previews each write.'" in SOURCE
-    for _icon, label, _long in re.findall(r"\['([\w-]+)', '([^']+)', '([^']+)'\]", part("const RULES", "function Scopes(")):
-        assert len(label.split()) <= 5, label
+    labels = re.findall(r"\['([\w-]+)', '([^']+)', \[", part("const RULES", "function Scopes("))
+    assert len(labels) == 4
+    for _icon, label in labels:
+        assert len(label.split()) <= 6, label
 
 
 def test_every_button_that_opens_hermes_form_has_one_label():

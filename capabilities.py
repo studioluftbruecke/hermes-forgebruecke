@@ -26,8 +26,12 @@ from typing import Any, Callable, Iterable, Optional
 YES, NO = "yes", "no"
 AGENT, OWNER = "bot", "owner"
 BOT_SCOPES = ("read:notification", "write:issue", "write:repository", "read:user")
-OWNER_SCOPES = ("write:repository", "read:user")
-OWNER_RISK = "Every agent shell on the Hermes host can read this token and could merge into main as you."
+OWNER_SCOPES = ("write:repository", "read:user")  # required: token_verdict checks these
+# The recommended mint adds write:issue for "Comment as you" (D-50); a token without it keeps Merge.
+OWNER_MINT = OWNER_SCOPES + ("write:issue",)
+# His words for the write token (0.0.19 review, rule 2 on the settings page). desktop/plugin.js rule 2 ends with
+# the same clause; tests/test_v0021_copy.py holds them equal.
+OWNER_RISK = "It is also exposed to Hermes, ultimately giving Hermes full access to your account."
 
 # The two key fields, one row each. plugin.yaml's config_schema carries the same label and env
 # (tests/test_settings.py holds them equal); the settings page draws its setup steps from these rows.
@@ -38,8 +42,8 @@ TOKENS = (
      "never": "Anything as you."},
     {"role": OWNER, "key": "owner_token", "env": "FORGEBRUECKE_PERSONAL_WRITE_TOKEN",
      "label": "Your write token (optional)", "name": "your write token", "required": False, "account": "you",
-     "mint": OWNER_SCOPES,
-     "unlocks": "Adds a Merge button to the desk.",
+     "mint": OWNER_MINT,
+     "unlocks": "Adds the desk's Merge and Comment buttons.",
      "never": "Agent tools, mention answers or flows.",
      "risk": OWNER_RISK},
 )
@@ -66,6 +70,7 @@ CAPS = {
     "read:repos": (AGENT, ("read:repository", "read:issue"), ""),
     "admin:repo": "Hermes' account as an admin of the repo (Settings, Collaborators in Forgejo)",
     "owner:merge": (OWNER, ("write:repository",), ""),
+    "owner:comment": (OWNER, ("write:issue",), ""),
     "notifications": (AGENT, ("read:notification",), "for all repositories"),
     "mark_read": (AGENT, ("write:notification",), ""),
     "write:agent": (AGENT, ("write:issue", "write:repository"), ""),
@@ -103,6 +108,7 @@ FEATURES = (
     ("audit", "Security audit", (("admin:repo",),), "audit"),
     ("presets", "Protection presets", (("admin:repo",),), None),
     ("owner_merge", "Merge button", (("owner:merge",),), None),
+    ("owner_comment", "Comment as you", (("owner:comment",),), None),
     ("import", "Project import", (("write:agent",),), None),
 )
 
@@ -110,8 +116,8 @@ SETUPS = (
     {"id": "agent_only", "label": "Hermes' account only (recommended)", "tokens": {AGENT: BOT_SCOPES},
      "summary": "Hermes works as its own Forgejo account. You merge in Forgejo."},
     {"id": "agent_owner", "label": "Hermes' account plus your write token", "tokens": {AGENT: BOT_SCOPES,
-                                                                                       OWNER: OWNER_SCOPES},
-     "summary": "Adds the desk's Merge button, on your click. " + OWNER_RISK},
+                                                                                       OWNER: OWNER_MINT},
+     "summary": "Adds Merge and Comment on the desk, on your click. " + OWNER_RISK},
 )
 
 
@@ -201,6 +207,8 @@ def probe_caps(reports: dict) -> "tuple[dict, list]":
         caps["admin:repo"] = AGENT
     if _ok(owner, "write:repository"):
         caps["owner:merge"] = OWNER
+    if _ok(owner, "write:issue"):
+        caps["owner:comment"] = OWNER
     if _ok(bot, "read:notification"):
         caps["notifications"] = AGENT
     if _ok(bot, "write:notification"):

@@ -34,7 +34,7 @@ def test_the_desk_comes_a_page_at_a_time_and_every_row_can_be_read(tmp_path):
     prs = [flow_pr(n) for n in range(10, 70)]
     first, _ = desk(tmp_path, prs=prs)
     assert len(first["rows"]) == 20 and first["total"] == 61 and first["has_more"] is True and first["next_page"] == 2
-    assert first["counts"] == {"waiting": 1, "running": 0, "blocked": 60}
+    assert first["counts"] == {"waiting": 1, "parked": 0, "running": 0, "blocked": 60}
     seen = numbers(first)
     page = first
     while page.get("next_page"):
@@ -48,7 +48,7 @@ def test_the_desk_comes_a_page_at_a_time_and_every_row_can_be_read(tmp_path):
 def test_the_desk_of_one_repo_lists_and_counts_that_repo_only(tmp_path):
     out, _ = desk(tmp_path, {"repo": OTHER}, prs=[flow_pr(7), flow_pr(8, OTHER), flow_pr(9, OTHER)])
     assert {row["repo"] for row in out["rows"]} == {OTHER} and sorted(numbers(out)) == [8, 9]
-    assert out["total"] == 2 and out["counts"] == {"waiting": 0, "running": 0, "blocked": 2}
+    assert out["total"] == 2 and out["counts"] == {"waiting": 0, "parked": 0, "running": 0, "blocked": 2}
     upper, _ = desk(tmp_path, {"repo": OTHER.upper()})
     assert sorted(numbers(upper)) == [8, 9]
     bad, _ = desk(tmp_path, {"repo": "not a repo"})

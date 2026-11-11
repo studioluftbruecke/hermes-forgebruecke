@@ -94,7 +94,7 @@ def test_a_feature_that_lacks_two_things_of_one_token_names_the_token_once():
 
 
 def test_the_registry_names_no_token_by_its_field_id_except_where_another_test_still_pins_it():
-    spoken = [caps.needs_sentence([cap]) for cap in caps.CAPS if cap != "owner:merge"]
+    spoken = [caps.needs_sentence([cap]) for cap in caps.CAPS if cap not in ("owner:merge", "owner:comment")]
     spoken += [t[key] for t in caps.TOKENS for key in ("name", "unlocks", "never")]
     spoken += [s[key] for s in caps.SETUPS for key in ("label", "summary")] + [label for _i, label, _n, _o in caps.FEATURES]
     for text in spoken:

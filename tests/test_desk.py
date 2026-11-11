@@ -101,7 +101,7 @@ def test_desk_rows_counts_checks_and_last_comment(tmp_path):
     gs, sec = getters(you="acme")
     status, body = desk.api_desk(gs, sec, data_dir=tmp_path, transport=f, now=lambda: 1000)
     assert status == 200 and body["ok"]
-    assert body["label"] == "Forgejo · 1" and body["counts"] == {"waiting": 1, "running": 0, "blocked": 1}
+    assert body["label"] == "Forgejo · 1" and body["counts"] == {"waiting": 1, "parked": 0, "running": 0, "blocked": 1}
     first = body["rows"][0]
     assert first["number"] == 3 and first["tab"] == "waiting" and first["waiting_on"] == "acme"
     assert [g["segment"] for g in first["gates"]] == ["done", "done", "waiting"]
@@ -370,8 +370,8 @@ def test_settings_route_lists_the_two_key_fields_with_what_the_probe_found(tmp_p
     assert [t["env"] for t in body["tokens"]] == ["FORGEBRUECKE_BOT_ACCOUNT_TOKEN", "FORGEBRUECKE_PERSONAL_WRITE_TOKEN"]
     assert bot["set"] and bot["required"] and bot["login"] == "forgebruecke-bot" and bot["error"] is None
     assert bot["mint"] == ["read:notification", "write:issue", "write:repository", "read:user"]
-    assert not owner["set"] and not owner["required"] and owner["mint"] == ["write:repository", "read:user"]
-    assert "could merge into main as you" in owner["risk"] and "Merge button" in owner["unlocks"]
+    assert not owner["set"] and not owner["required"] and owner["mint"] == ["write:repository", "read:user", "write:issue"]
+    assert "full access to your account" in owner["risk"] and "Merge and Comment buttons" in owner["unlocks"]
     assert body["you"] is None and body["you_suggestion"] == "acme"
     assert BOT not in json.dumps(body) and "READ_TOKEN" not in json.dumps(body)
 

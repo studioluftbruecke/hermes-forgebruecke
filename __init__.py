@@ -7,7 +7,7 @@ loop. Every tool handler ends in ``_answer``, which gives refusals and failures 
 
 Secrets are read at call time with ``agent.secret_scope.get_secret`` (catalog rule 11): the token of
 Hermes' own Forgejo account ``FORGEBRUECKE_BOT_ACCOUNT_TOKEN`` and the optional write token of the user's
-account ``FORGEBRUECKE_PERSONAL_WRITE_TOKEN`` (only the desk's Merge button). What Hermes may read or write
+account ``FORGEBRUECKE_PERSONAL_WRITE_TOKEN`` (only the desk's Merge and Comment buttons). What Hermes may read or write
 in a repo is that account's Forgejo collaborator right there.
 Siblings are imported lazily so the package loads under any folder name in tests. Tool names stay
 descriptive (``forgejo_doctor``), not branded.

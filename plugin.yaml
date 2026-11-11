@@ -1,6 +1,6 @@
 name: forgebruecke
-version: "0.0.20"
-description: "A bridge between Hermes and your self-hosted Forgejo. Hermes works as its own account, you approve each write, and a desk shows the pull requests that wait for you."
+version: "0.0.21"
+description: "A bridge between Hermes and your self-hosted Forgejo. Hermes works as its own account, writes follow Hermes' approval setting, and a desk shows the pull requests that wait for you."
 author: "Studio Luftbrücke"
 license: MIT
 requires_hermes: ">=0.23.0"
@@ -36,10 +36,10 @@ config_schema:
     type: secret
     env: FORGEBRUECKE_PERSONAL_WRITE_TOKEN
     label: "Your write token (optional)"
-    description: "A token of your own account for the desk's Merge button; any agent shell on this host can read it and could merge into main as you."
+    description: "For the desk's Merge and Comment buttons; it is also exposed to Hermes, ultimately giving Hermes full access to your account."
   poll_interval:
     type: integer
-    default: 120
+    default: 30
     label: "Check Forgejo every (seconds)"
     description: "How often mentions and flows are checked, from 30 to 3600 seconds."
   mention_authors:
