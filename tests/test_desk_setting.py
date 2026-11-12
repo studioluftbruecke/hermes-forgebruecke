@@ -258,8 +258,8 @@ def test_a_file_error_while_creating_the_reviewer_answers_with_the_command(tmp_p
 
     def created_but_unwritable(cmd, **kw):
         target = tmp_path / "profiles" / desk.REVIEWER
-        target.mkdir()
-        (target / "SOUL.md").mkdir()  # a folder where the file goes: the write fails
+        target.mkdir(exist_ok=True)
+        (target / "SOUL.md").mkdir(exist_ok=True)  # a folder where the file goes: the write fails
         return subprocess.CompletedProcess(cmd, 0, "", "")
     status, body = reviewer(tmp_path, created_but_unwritable)
-    assert status == 200 and body["ok"] is False and body["error"] == "create_failed" and body["command"]
+    assert status == 200 and body["ok"] is False and body["error"] == "create_failed" and "SOUL.md" in body["message"]

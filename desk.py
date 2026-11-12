@@ -1133,16 +1133,29 @@ def _log(data_dir: Any, record: dict) -> None:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+# What `hermes config unset` answers for a key the profile does not hold: nothing to remove, so not a failure.
+_NOT_SET = "Config key not set"
+
+
+def _token_unsets() -> "list[list[str]]":
+    """The `hermes` arguments that remove Forgebrücke's two tokens from the reviewer profile. Hermes' own
+    credential handling edits the profile's .env; the plugin never opens that file."""
+    s = _mod("settings")
+    return [["-p", REVIEWER, "config", "unset", key] for key in (s.TOKEN_ENV, s.OWNER_TOKEN_ENV)]
+
+
 def reviewer_command(source: str) -> str:
+    """The commands the route runs, one per line, for a user who runs them himself."""
     src = source or "<your profile>"
-    return f"hermes profile create {REVIEWER} --clone-from {src} --no-alias"
+    return "\n".join([f"hermes profile create {REVIEWER} --clone-from {src} --no-alias",
+                      *(" ".join(["hermes", *args]) for args in _token_unsets())])
 
 
 def api_create_reviewer(body: Any, *, source: str, home: Any = None, run: Callable = subprocess.run,
                         hermes: Optional[str] = None) -> "tuple[int, dict]":
-    """On the user's click in the desk's settings: clone his current profile as a reviewer
-    profile, give it a reviewer SOUL.md, and strip every Forgebrücke token from its .env (a reviewer writes
-    its verdict file only). When the route cannot run Hermes, answer with the exact command."""
+    """On the user's click in the desk's settings: clone his current profile as a reviewer profile, remove
+    Forgebrücke's tokens from it with `hermes config unset` (a reviewer writes its verdict file only), and give
+    it a reviewer SOUL.md. When the route cannot run Hermes, answer with the exact commands."""
     profile = _mod("profile")
     existing = profile.list_profiles(home) or []
     command = reviewer_command(source)
@@ -1151,9 +1164,9 @@ def api_create_reviewer(body: Any, *, source: str, home: Any = None, run: Callab
     exe = hermes if hermes is not None else shutil.which("hermes")
     if not exe or not source:
         return 200, {"ok": False, "error": "run_it_yourself", "command": command,
-                     "message": "Run this command in a terminal on the Hermes host. Then pick the profile in "
+                     "message": "Run these commands in a terminal on the Hermes host. Then pick the profile in "
                                 "Hermes' settings."}
-    def failed(message: str) -> "tuple[int, dict]":
+    def failed(message: str, command: str = command) -> "tuple[int, dict]":
         clear_cache()
         return 200, {"ok": False, "error": "create_failed", "command": command, "message": message}
     try:
@@ -1161,25 +1174,32 @@ def api_create_reviewer(body: Any, *, source: str, home: Any = None, run: Callab
                     "--description", "Forgebrücke reviewer: writes verdict files only"],
                    capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
-        return failed("Hermes did not finish within 120 seconds. Run the command in a terminal on the Hermes host.")
+        return failed("Hermes did not finish within 120 seconds. Run the commands in a terminal on the Hermes host.")
     except OSError as exc:
-        return failed(f"Hermes could not be started ({type(exc).__name__}). Run the command in a terminal on the "
+        return failed(f"Hermes could not be started ({type(exc).__name__}). Run the commands in a terminal on the "
                       "Hermes host.")
     if getattr(done, "returncode", 1) != 0:
         return failed(_cap(getattr(done, "stderr", "") or getattr(done, "stdout", ""), 400))
+    left = []
+    for args in _token_unsets():
+        try:
+            out = run([exe, *args], capture_output=True, text=True, timeout=60)
+            removed = getattr(out, "returncode", 1) == 0 or _NOT_SET in str(getattr(out, "stderr", "") or "")
+        except (subprocess.TimeoutExpired, OSError):
+            removed = False
+        if not removed:
+            left.append(" ".join(["hermes", *args]))
+    if left:
+        return failed(f"{REVIEWER} exists now, but Hermes did not remove Forgebrücke's tokens from it. Run these "
+                      "commands in a terminal on the Hermes host before a flow uses it.", "\n".join(left))
     root = profile.profiles_root(home)
     target = Path(root) / REVIEWER if root else None
     try:
         if target is not None and target.is_dir():
             (target / "SOUL.md").write_text(REVIEWER_SOUL, encoding="utf-8")
-            env = target / ".env"
-            if env.exists():
-                kept = [ln for ln in env.read_text(encoding="utf-8").splitlines()
-                        if not ln.strip().startswith("FORGEBRUECKE_")]
-                env.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
     except OSError as exc:
-        return failed(f"{REVIEWER} exists now, but its SOUL.md or .env could not be written "
-                      f"({type(exc).__name__}). Check both files before a flow uses it.")
+        return failed(f"{REVIEWER} exists now, but its SOUL.md could not be written ({type(exc).__name__}). "
+                      "Check it before a flow uses it.", "")
     clear_cache()
     return 200, {"ok": True, "created": True, "name": REVIEWER,
                  "message": f"Created {REVIEWER}. Next, pick it as the profile that runs agent reviews in Hermes' "

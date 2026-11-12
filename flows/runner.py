@@ -7,7 +7,10 @@ later reads the verdict file the worker had to write. The model's chat text is n
 
 The child gets a minimal environment built from an allowlist (no secret of the parent process reaches
 it), an empty working directory inside the run folder, no core dumps, and its own process group so a
-timeout stops the whole tree.
+timeout stops the whole tree. ``HERMES_WRITE_SAFE_ROOT`` in that environment would not confine the worker's
+file tools: ``hermes chat`` runs the turn in the profile's gateway, and only a short allowlist of the
+client's variables travels with the session (``agent/session_client_env.py``; measured on 0.23.1, a worker
+with it set wrote outside its verdict file).
 
 Verdict file shape: ``{"verdict": "pass"|"fail", "head_sha": "<sha>", "summary": "<one sentence>",
 "findings": [{"file", "line", "problem"}]}``.

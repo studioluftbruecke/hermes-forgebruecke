@@ -45,7 +45,7 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 const ID = 'forgebruecke'
 // The same string as plugin.yaml (tests/test_settings.py holds them equal). The routes answer Hermes' version,
 // so the pages can say when this half is older or newer.
-export const VERSION = '0.0.22'
+export const VERSION = '0.0.23'
 const PATH = '/forgebruecke'
 const TAG = '[' + ID + ']'
 const NAV_POLL_MS = 60000
@@ -1285,7 +1285,7 @@ function AgentReviews({ s }) {
     el('div', { style: { ...S.row(8), ...S.text } },
       el('span', {}, 'Agent reviews run in profile ', el('span', { style: { ...S.mono, color: T.primary } }, s.default_review_profile || 'this one'), '.'),
       s.reviewer && !s.reviewer.exists ? el(Button, { onClick: create, size: 'xs', variant: 'secondary' }, 'Create a reviewer profile') : null),
-    answer ? el('div', { style: { ...S.text, color: answer.ok ? T.green : T.yellow } }, answer.message, answer.command ? el('div', { style: { ...S.mono, color: T.primary } }, answer.command) : null) : null)
+    answer ? el('div', { style: { ...S.text, color: answer.ok ? T.green : T.yellow } }, answer.message, answer.command ? el('div', { style: { ...S.mono, color: T.primary, whiteSpace: 'pre-wrap' }, 'data-test': 'reviewer-command' }, answer.command) : null) : null)
 }
 
 // A token saved after this profile's plugin host started is unseen until the host restarts (the backend

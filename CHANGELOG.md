@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.23
+
+- "Create a reviewer profile" removes Forgebrücke's two tokens from the new profile with
+  `hermes -p forgebruecke-reviewer config unset`, so Hermes edits its own `.env`; the plugin no longer reads or
+  rewrites that file. When a removal fails, the settings page shows the commands still to run, one per line.
+
 ## 0.0.22
 
 - The sidebar row says Forgebrücke, with the number of pull requests waiting for you: "Forgebrücke · 3" (was

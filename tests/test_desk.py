@@ -2,6 +2,7 @@
 the sidebar count, the merge button in the owner lane only, the reviewer-profile fallback, and the review
 worker's session reading nothing."""
 import json
+import os
 import types
 
 import pytest
@@ -303,35 +304,95 @@ def test_merge_rejects_a_bad_request():
 
 # --- the reviewer profile (N20 fallback) ------------------------------------------------------------
 
-def test_create_reviewer_strips_forge_tokens_and_writes_the_soul(tmp_path):
+class FakeHermes:
+    """`hermes profile create` and `hermes -p <name> config unset <key>` as the route sees them. The reviewer's
+    secrets live in a dict, so any .env file the plugin opened would be a file this fake never wrote."""
+
+    def __init__(self, tmp_path, keys=("OPENCODE_GO_API_KEY", "FORGEBRUECKE_BOT_ACCOUNT_TOKEN",
+                                        "FORGEBRUECKE_PERSONAL_WRITE_TOKEN"), unset_error=""):
+        self.root, self.keys, self.unset_error, self.calls = tmp_path / "profiles", set(keys), unset_error, []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append(cmd[1:])
+        if cmd[1:3] == ["profile", "create"]:
+            (self.root / cmd[3]).mkdir()
+            (self.root / cmd[3] / "config.yaml").write_text("x: 1")
+            fd = os.open(self.root / cmd[3] / ".env", os.O_WRONLY | os.O_CREAT)  # not through open(): see no_env_file
+            os.write(fd, "".join(f"{k}=v\n" for k in sorted(self.keys)).encode())
+            os.close(fd)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        assert cmd[1:5] == ["-p", desk.REVIEWER, "config", "unset"], cmd
+        if self.unset_error:
+            return types.SimpleNamespace(returncode=1, stdout="", stderr=self.unset_error)
+        if cmd[5] not in self.keys:
+            return types.SimpleNamespace(returncode=1, stdout="", stderr=f"Config key not set: {cmd[5]}")
+        self.keys.discard(cmd[5])
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+
+@pytest.fixture
+def no_env_file(monkeypatch):
+    """Fails the test when the plugin opens any .env file (catalog review of 0.0.22: Hermes owns that file)."""
+    import builtins
+    import io
+    import pathlib
+    real_open, real_io_open = builtins.open, io.open
+
+    def guarded(opener):
+        def open_(file, *a, **k):
+            assert pathlib.Path(str(file)).name != ".env", f"the plugin opened {file}"
+            return opener(file, *a, **k)
+        return open_
+    monkeypatch.setattr(builtins, "open", guarded(real_open))
+    monkeypatch.setattr(io, "open", guarded(real_io_open))
+
+
+def reviewer_home(tmp_path):
     home = tmp_path / "profiles" / "coding"
     home.mkdir(parents=True)
     (home / "config.yaml").write_text("x: 1")
-    calls = []
-
-    def run(cmd, **kw):
-        calls.append(cmd)
-        target = tmp_path / "profiles" / desk.REVIEWER
-        target.mkdir()
-        (target / "config.yaml").write_text("x: 1")
-        (target / ".env").write_text("OPENCODE_GO_API_KEY=k\nFORGEBRUECKE_TOKEN=t\nFORGEBRUECKE_OWNER_TOKEN=o\n")
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    status, body = desk.api_create_reviewer({}, source="coding", home=home, run=run, hermes="/bin/hermes")
-    assert body["created"] and calls[0][:6] == ["/bin/hermes", "profile", "create", desk.REVIEWER, "--clone-from",
-                                                "coding"]
-    target = tmp_path / "profiles" / desk.REVIEWER
-    assert (target / ".env").read_text() == "OPENCODE_GO_API_KEY=k\n"
-    assert "verdict file" in (target / "SOUL.md").read_text()
-    again = desk.api_create_reviewer({}, source="coding", home=home, run=run, hermes="/bin/hermes")[1]
-    assert again["created"] is False and len(calls) == 1
+    return home
 
 
-def test_create_reviewer_without_hermes_shows_the_command(tmp_path):
+def test_create_reviewer_removes_forge_tokens_through_hermes_and_writes_the_soul(tmp_path, no_env_file):
+    home, hermes = reviewer_home(tmp_path), FakeHermes(tmp_path)
+    status, body = desk.api_create_reviewer({}, source="coding", home=home, run=hermes, hermes="/bin/hermes")
+    assert status == 200 and body["ok"] and body["created"]
+    assert hermes.calls[0][:5] == ["profile", "create", desk.REVIEWER, "--clone-from", "coding"]
+    assert hermes.keys == {"OPENCODE_GO_API_KEY"}
+    assert "verdict file" in (tmp_path / "profiles" / desk.REVIEWER / "SOUL.md").read_text()
+    again = desk.api_create_reviewer({}, source="coding", home=home, run=hermes, hermes="/bin/hermes")[1]
+    assert again["created"] is False and len(hermes.calls) == 3
+
+
+def test_a_source_without_the_write_token_still_gets_a_reviewer(tmp_path, no_env_file):
+    hermes = FakeHermes(tmp_path, keys=("FORGEBRUECKE_BOT_ACCOUNT_TOKEN",))
+    body = desk.api_create_reviewer({}, source="coding", home=reviewer_home(tmp_path), run=hermes,
+                                    hermes="/bin/hermes")[1]
+    assert body["ok"] and body["created"] and hermes.keys == set()
+
+
+def test_a_failed_unset_answers_with_the_commands_still_to_run(tmp_path, no_env_file):
+    hermes = FakeHermes(tmp_path, unset_error="✗ .env is read-only")
+    status, body = desk.api_create_reviewer({}, source="coding", home=reviewer_home(tmp_path), run=hermes,
+                                            hermes="/bin/hermes")
+    assert status == 200 and body["ok"] is False and body["error"] == "create_failed"
+    assert body["command"].splitlines() == [
+        f"hermes -p {desk.REVIEWER} config unset FORGEBRUECKE_BOT_ACCOUNT_TOKEN",
+        f"hermes -p {desk.REVIEWER} config unset FORGEBRUECKE_PERSONAL_WRITE_TOKEN"]
+    assert "before a flow uses it" in body["message"]
+    assert not (tmp_path / "profiles" / desk.REVIEWER / "SOUL.md").exists()
+
+
+def test_create_reviewer_without_hermes_shows_the_commands(tmp_path):
     home = tmp_path / "profiles" / "coding"
     home.mkdir(parents=True)
     body = desk.api_create_reviewer({}, source="coding", home=home, hermes="", run=None)[1]
     assert body["error"] == "run_it_yourself"
-    assert body["command"] == f"hermes profile create {desk.REVIEWER} --clone-from coding --no-alias"
+    assert body["command"].splitlines() == [
+        f"hermes profile create {desk.REVIEWER} --clone-from coding --no-alias",
+        f"hermes -p {desk.REVIEWER} config unset FORGEBRUECKE_BOT_ACCOUNT_TOKEN",
+        f"hermes -p {desk.REVIEWER} config unset FORGEBRUECKE_PERSONAL_WRITE_TOKEN"]
 
 
 # --- the review worker reads nothing (measured leak path, 2026-11-09) ---------------------------------

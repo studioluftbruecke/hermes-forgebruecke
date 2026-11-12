@@ -209,6 +209,6 @@ def test_the_manifest_drops_the_retired_fields_adds_you_and_says_the_write_token
     owner_row = next(t for t in sub("capabilities").TOKENS if t["role"] == "owner")
     assert "full access to your account" in owner_row["risk"]
     version = sub("version").VERSION
-    assert version == "0.0.22"
+    assert version == "0.0.23"
     assert re.search(r'^version: "' + re.escape(version) + '"$', manifest, re.M)
     assert '"version": "' + version + '"' in (ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8")

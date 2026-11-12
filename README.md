@@ -6,7 +6,7 @@ account on its own feature branches, and the merge into `main` stays yours.
 
 ![The Forgejo desk in Hermes Desktop](docs/screenshot-1.png)
 
-Version 0.0.22. MIT. A Studio Luftbrücke Hermes plugin.
+Version 0.0.23. MIT. A Studio Luftbrücke Hermes plugin.
 
 ## What it does
 
@@ -145,8 +145,8 @@ Optional:
 - **The desk.** The page calls only this plugin's routes on your Hermes backend. `/merge` merges with
   your write token, pinned to the commit the desk showed; `/comment` posts your words as you.
   `/park` and `/unpark` write only `parked.json`. `/setting` saves `you` and the four
-  switches. "Create a reviewer profile" runs `hermes profile create` and removes every
-  `FORGEBRUECKE_*` key from the new profile. `/reload-tokens` restarts the plugin host to read a new
+  switches. "Create a reviewer profile" runs `hermes profile create`, then
+  `hermes config unset` for both tokens. `/reload-tokens` restarts the plugin host to read a new
   token. "Ask Hermes" opens a chat with a draft and sends nothing.
   A process that can call these routes can do the same, so keep Hermes' approvals on.
 - **Guard.** A tool call that would edit the profile's settings or secrets, this plugin's files or
