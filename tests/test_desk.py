@@ -1,4 +1,4 @@
-"""M7: the desk's backend. Rows and tabs from the flow store, the checks and last comment from the forge,
+"""The desk's backend. Rows and tabs from the flow store, the checks and last comment from the forge,
 the sidebar count, the merge button in the owner lane only, the reviewer-profile fallback, and the review
 worker's session reading nothing."""
 import json
@@ -82,7 +82,7 @@ def test_closed_or_merged_prs_leave_the_desk():
 
 
 def test_last_comment_is_plain_text_without_markup_or_our_footer():
-    """Seen on the Mac (2026-11-09): the desk showed a status comment as raw `| --- |` rows and `<sub>`."""
+    """The desk once showed a status comment as raw `| --- |` rows and `<sub>`."""
     status = ("**Forgebrücke · flow `demo` · head `acec6dfa1003`**\n\n| Gate | State | What happened |\n"
               "| --- | --- | --- |\n| review by coding | ✅ passed | fine |\n\n"
               "<sub>Kept up to date by Forgebrücke (Hermes). The merge into the target branch is yours.</sub>")
@@ -131,7 +131,7 @@ def test_without_you_the_desk_says_so_and_suggests_the_owner_of_the_agents_repos
 
 
 def test_waiting_for_me_lists_prs_that_request_your_review_without_a_flow(tmp_path):
-    """D28 with review_every_pr off: demo #3 requests acme's review and runs no flow; #8 requests someone else
+    """With review_every_pr off: demo #3 requests acme's review and runs no flow; #8 requests someone else
     and stays off the desk; a flow row stays a flow row."""
     f = forge()
     other = {**f.data[DEMO]["pulls"][3], "number": 8, "title": "Not for you", "requested_reviewers": [{"login": "bob"}]}
@@ -163,8 +163,8 @@ def add_pr(f, n, *, author="hermes", asked=(), title=None):
 
 
 def test_every_open_pr_that_does_not_ask_you_yet_still_waits_for_you(tmp_path):
-    """D33 (default on): #8 was opened without a review request (a raw API call, the web page) and still shows,
-    marked so, with the Merge button his account may use (FB-1); #9 is yours and #10 you already reviewed,
+    """With review_every_pr on (the default): #8 was opened without a review request (a raw API call, the web page) and still shows,
+    marked so, with the Merge button the user's account may use; #9 is yours and #10 you already reviewed,
     so neither shows."""
     f = forge()
     add_pr(f, 8, asked=("bob",))
@@ -269,8 +269,8 @@ def test_merge_refuses_a_moved_head_and_a_flow_that_is_not_waiting(tmp_path):
 
 
 def test_merge_a_pr_without_a_flow_that_requests_my_review(tmp_path):
-    """Seen on the Mac (2026-11-09): with his write token set, review-requested rows had no Merge button and
-    /merge refused them as not_waiting. They merge now on his click, pinned to the head the desk showed."""
+    """With the user's write token set, review-requested rows once had no Merge button and
+    /merge refused them as not_waiting. They merge now on the user's click, pinned to the head the desk showed."""
     f = forge()  # sample PR #3 requests a review from acme; no flow state is stored
     gs, sec = getters(("bot", "owner"), you="acme")
     _, desk_body = desk.api_desk(gs, sec, data_dir=tmp_path, transport=f, now=lambda: 1000)
@@ -301,10 +301,10 @@ def test_merge_rejects_a_bad_request():
     assert desk.api_merge(gs, sec, {"repo": DEMO, "number": 3, "head_sha": "abc"}, data_dir=None)[0] == 400
 
 
-# --- the reviewer profile (N20 fallback) ------------------------------------------------------------
+# --- the reviewer profile -------------------------------------------------------------------------
 
 class FakeHermes:
-    """`hermes profile create` and `hermes -p <name> config unset <key>` as the route sees them. The reviewer's
+    """`hermes profile create`, `memory reset` and `hermes -p <name> config unset <key>` as the route sees them. The reviewer's
     secrets live in a dict, so any .env file the plugin opened would be a file this fake never wrote."""
 
     def __init__(self, tmp_path, keys=("OPENCODE_GO_API_KEY", "FORGEBRUECKE_BOT_ACCOUNT_TOKEN",
@@ -320,9 +320,11 @@ class FakeHermes:
             os.write(fd, "".join(f"{k}=v\n" for k in sorted(self.keys)).encode())
             os.close(fd)
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-        assert cmd[1:5] == ["-p", desk.REVIEWER, "config", "unset"], cmd
         if self.unset_error:
             return types.SimpleNamespace(returncode=1, stdout="", stderr=self.unset_error)
+        if cmd[3:5] == ["memory", "reset"]:
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        assert cmd[1:5] == ["-p", desk.REVIEWER, "config", "unset"], cmd
         if cmd[5] not in self.keys:
             return types.SimpleNamespace(returncode=1, stdout="", stderr=f"Config key not set: {cmd[5]}")
         self.keys.discard(cmd[5])
@@ -353,48 +355,49 @@ def reviewer_home(tmp_path):
     return home
 
 
-def test_create_reviewer_removes_forge_tokens_through_hermes_and_writes_the_soul(tmp_path, no_env_file):
+def test_create_reviewer_removes_forge_tokens_through_hermes(tmp_path, no_env_file):
     home, hermes = reviewer_home(tmp_path), FakeHermes(tmp_path)
-    status, body = desk.api_create_reviewer({}, source="coding", home=home, run=hermes, hermes="/bin/hermes")
+    status, body = desk.api_create_reviewer({"confirm": True}, source="coding", home=home, run=hermes,
+                                            hermes="/bin/hermes")
     assert status == 200 and body["ok"] and body["created"]
     assert hermes.calls[0][:5] == ["profile", "create", desk.REVIEWER, "--clone-from", "coding"]
     assert hermes.keys == {"OPENCODE_GO_API_KEY"}
-    assert "verdict file" in (tmp_path / "profiles" / desk.REVIEWER / "SOUL.md").read_text()
-    again = desk.api_create_reviewer({}, source="coding", home=home, run=hermes, hermes="/bin/hermes")[1]
-    assert again["created"] is False and len(hermes.calls) == 3
+    again = desk.api_create_reviewer({"confirm": True}, source="coding", home=home, run=hermes, hermes="/bin/hermes")[1]
+    assert again["created"] is False and len(hermes.calls) == 4
 
 
 def test_a_source_without_the_write_token_still_gets_a_reviewer(tmp_path, no_env_file):
     hermes = FakeHermes(tmp_path, keys=("FORGEBRUECKE_BOT_ACCOUNT_TOKEN",))
-    body = desk.api_create_reviewer({}, source="coding", home=reviewer_home(tmp_path), run=hermes,
+    body = desk.api_create_reviewer({"confirm": True}, source="coding", home=reviewer_home(tmp_path), run=hermes,
                                     hermes="/bin/hermes")[1]
     assert body["ok"] and body["created"] and hermes.keys == set()
 
 
 def test_a_failed_unset_answers_with_the_commands_still_to_run(tmp_path, no_env_file):
     hermes = FakeHermes(tmp_path, unset_error="✗ .env is read-only")
-    status, body = desk.api_create_reviewer({}, source="coding", home=reviewer_home(tmp_path), run=hermes,
-                                            hermes="/bin/hermes")
+    status, body = desk.api_create_reviewer({"confirm": True}, source="coding", home=reviewer_home(tmp_path),
+                                            run=hermes, hermes="/bin/hermes")
     assert status == 200 and body["ok"] is False and body["error"] == "create_failed"
     assert body["command"].splitlines() == [
+        f"hermes -p {desk.REVIEWER} memory reset --yes --target all",
         f"hermes -p {desk.REVIEWER} config unset FORGEBRUECKE_BOT_ACCOUNT_TOKEN",
         f"hermes -p {desk.REVIEWER} config unset FORGEBRUECKE_PERSONAL_WRITE_TOKEN"]
     assert "before a flow uses it" in body["message"]
-    assert not (tmp_path / "profiles" / desk.REVIEWER / "SOUL.md").exists()
 
 
 def test_create_reviewer_without_hermes_shows_the_commands(tmp_path):
     home = tmp_path / "profiles" / "coding"
     home.mkdir(parents=True)
-    body = desk.api_create_reviewer({}, source="coding", home=home, hermes="", run=None)[1]
+    body = desk.api_create_reviewer({"confirm": True}, source="coding", home=home, hermes="", run=None)[1]
     assert body["error"] == "run_it_yourself"
     assert body["command"].splitlines() == [
         f"hermes profile create {desk.REVIEWER} --clone-from coding --no-alias",
+        f"hermes -p {desk.REVIEWER} memory reset --yes --target all",
         f"hermes -p {desk.REVIEWER} config unset FORGEBRUECKE_BOT_ACCOUNT_TOKEN",
         f"hermes -p {desk.REVIEWER} config unset FORGEBRUECKE_PERSONAL_WRITE_TOKEN"]
 
 
-# --- the review worker reads nothing (measured leak path, 2026-11-09) ---------------------------------
+# --- the review worker reads nothing (a measured leak path) -----------------------------------------
 
 def test_a_review_worker_session_reads_nothing_from_the_forge():
     run = approval.RunContext(single_query=True, platform="cli", source="forgebruecke-review")
@@ -444,10 +447,14 @@ def test_settings_route_without_an_address_still_names_every_step(tmp_path):
     assert "address" in body["next_step"]
 
 
-def test_a_token_under_its_old_name_is_named_but_never_used(tmp_path):
+def test_only_the_declared_secret_names_are_read(tmp_path):
     secrets = {"FORGEBRUECKE_TOKEN": BOT, "FORGEBRUECKE_PERSONAL_READ_TOKEN": BOT}
-    status, body = desk.api_settings(lambda k, d=None: {"url": BASE}.get(k, d), secrets.get, transport=forge(),
+    asked = []
+
+    def get_secret(name):
+        asked.append(name)
+        return secrets.get(name)
+    status, body = desk.api_settings(lambda k, d=None: {"url": BASE}.get(k, d), get_secret, transport=forge(),
                                      home=tmp_path, now=lambda: 1000)
-    bot = body["tokens"][0]
-    assert bot["set"] is False and bot["renamed_from"] == "FORGEBRUECKE_TOKEN" and bot["login"] is None
-    assert [t["renamed_from"] for t in body["tokens"][1:]] == [None]
+    assert set(asked) <= {"FORGEBRUECKE_BOT_ACCOUNT_TOKEN", "FORGEBRUECKE_PERSONAL_WRITE_TOKEN"}
+    assert body["tokens"][0]["set"] is False and body["tokens"][0]["login"] is None

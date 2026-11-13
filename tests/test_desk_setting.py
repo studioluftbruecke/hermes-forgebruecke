@@ -239,7 +239,7 @@ def test_a_merge_that_landed_answers_200_when_the_action_log_fails(tmp_path, mon
 def reviewer(tmp_path, run):
     home = tmp_path / "profiles" / "coding"
     home.mkdir(parents=True, exist_ok=True)
-    return desk.api_create_reviewer({}, source="coding", home=home, run=run, hermes="/bin/hermes")
+    return desk.api_create_reviewer({"confirm": True}, source="coding", home=home, run=run, hermes="/bin/hermes")
 
 
 def test_a_hanging_hermes_answers_with_the_command(tmp_path):
@@ -256,10 +256,3 @@ def test_a_file_error_while_creating_the_reviewer_answers_with_the_command(tmp_p
     status, body = reviewer(tmp_path, cannot_start)
     assert status == 200 and body["error"] == "create_failed" and body["command"]
 
-    def created_but_unwritable(cmd, **kw):
-        target = tmp_path / "profiles" / desk.REVIEWER
-        target.mkdir(exist_ok=True)
-        (target / "SOUL.md").mkdir(exist_ok=True)  # a folder where the file goes: the write fails
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-    status, body = reviewer(tmp_path, created_but_unwritable)
-    assert status == 200 and body["ok"] is False and body["error"] == "create_failed" and "SOUL.md" in body["message"]

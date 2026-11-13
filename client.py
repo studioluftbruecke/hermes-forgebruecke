@@ -51,8 +51,8 @@ _VERSION_RE = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+))?")
 Transport = Callable[[str, str, dict, Optional[bytes], float], "tuple[int, dict, bytes]"]
 
 # Reads the desk keeps in flight at once. Its time went into waiting for one answer after another (measured:
-# 46 sequential reads, 10.6 s on the live Forgejo; experiments/forgebruecke/desk-load-time). 4 at once was the
-# fastest there, and more made each answer slower without a faster desk.
+# 46 sequential reads took 10.6 s on a live Forgejo). 4 at once was the fastest there, and more made each answer
+# slower without a faster desk.
 PARALLEL_READS = 4
 
 
@@ -67,19 +67,23 @@ def parallel_map(fn: Callable[[Any], Any], items: Any, limit: Optional[int] = No
         return [fn(x) for x in items]
     import threading
     from concurrent.futures import ThreadPoolExecutor
-    failed = threading.Event()
+    lock = threading.Lock()
+    first_failed = [len(items)]  # the lowest index that raised so far
 
-    def one(x: Any) -> Any:
-        if failed.is_set():
-            raise _Skipped()
+    def one(indexed: "tuple[int, Any]") -> Any:
+        i, x = indexed
+        with lock:
+            if i > first_failed[0]:  # only items after a failure are skipped; an earlier one still runs
+                raise _Skipped()
         try:
             return fn(x)
         except BaseException:
-            failed.set()
+            with lock:
+                first_failed[0] = min(first_failed[0], i)
             raise
 
     with ThreadPoolExecutor(max_workers=min(limit, len(items)), thread_name_prefix="forgebruecke-read") as pool:
-        return list(pool.map(one, items))
+        return list(pool.map(one, enumerate(items)))
 
 
 class _Skipped(Exception):
@@ -144,6 +148,17 @@ class Capabilities:
                 "tested_with": f"Forgejo {TESTED_FORGEJO}"}
 
 
+_AUTH_ECHO_RE = re.compile(r"(?i)(authorization[\"']?\s*[:=]\s*[\"']?)(?:token|bearer|basic)\s+[^\s\"',;]+")
+
+
+def scrub(text: str, secret: Optional[str] = None) -> str:
+    """``text`` without ``secret`` and without any echoed Authorization header value (a debug proxy echoes the
+    request's headers into its error page)."""
+    if secret:
+        text = text.replace(secret, "***")
+    return _AUTH_ECHO_RE.sub(lambda m: m.group(1) + "***", text)
+
+
 def forge_message(data: Any) -> str:
     if isinstance(data, dict):
         msg = str(data.get("message") or "")
@@ -164,9 +179,10 @@ def missing_scopes(message: str) -> tuple:
     return tuple(s for s in re.split(r"[\s,]+", m.group(1)) if s) if m else ()
 
 
-def error_for(status: int, data: Any, *, write: bool = False) -> ForgejoError:
-    """Map an HTTP failure to a sentence the user can act on. ``write`` is True for any method but GET."""
-    msg = forge_message(data)
+def error_for(status: int, data: Any, *, write: bool = False, secret: Optional[str] = None) -> ForgejoError:
+    """Map an HTTP failure to a sentence the user can act on. ``write`` is True for any method but GET.
+    ``secret`` (the request's token) never reaches the message, even when the forge's answer echoes it."""
+    msg = scrub(forge_message(data), secret)
     if status == 401:
         return ForgejoError(401, "token_rejected",
                             "Token rejected: Forgejo does not accept this token. Check that it is "
@@ -346,12 +362,16 @@ class ForgejoClient:
             try:
                 data = json.loads(payload.decode("utf-8")) if payload else None
             except (UnicodeDecodeError, json.JSONDecodeError):
+                if status < 400 and method != "GET":  # a proxy can let the write through and answer with a page
+                    raise ForgejoError(status, "not_forgejo", "This address did not answer like Forgejo. "
+                                       f"{MAY_HAVE_LANDED} Then check the Forgejo address.",
+                                       may_have_landed=True) from None
                 if status < 400:  # a login page or another app answers 200 with HTML
                     raise ForgejoError(status, "not_forgejo", "This address did not answer like Forgejo. "
                                        "Check the Forgejo address.") from None
                 data = payload.decode("utf-8", "replace")
         if status >= 400:
-            raise error_for(status, data, write=method != "GET")
+            raise error_for(status, data, write=method != "GET", secret=self._token)
         return Response(status, data, resp_headers)
 
     @staticmethod

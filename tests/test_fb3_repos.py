@@ -1,9 +1,9 @@
-"""The Repos tab (feedback round 2026-11-12, FB-3): open pull requests that expand with Merge, actions per repo,
+"""The Repos tab: open pull requests that expand with Merge, actions per repo,
 list or grid.
 
-Konstantin: "there could be a way to directly expand the PRs in the repos list and merge directly from there".
+A repo's open pull requests expand in the Repos list and merge from there.
 The backend half is ``desk.api_repo_pulls`` (``GET /repo-pulls``) on the tests' stand-in Forgejo; the page's
-functions run in node, cut out of desktop/plugin.js. The render is proven by the harness under experiments/."""
+functions run in node, cut out of desktop/plugin.js. The render itself is checked outside this suite."""
 import json
 import re
 import shutil
@@ -76,7 +76,7 @@ def test_the_expanded_repo_lists_every_open_pull_request_with_checks_and_merge(t
         (f"{DEMO}#8", DEMO, "PR 8", "hermes", "main", HEAD_SHA)
     assert p["url"] == f"{BASE}/{DEMO}/pulls/8" and p["age_s"] > 0
     assert p["checks"]["state"] == "failure" and {s["context"] for s in p["checks"]["statuses"]} == {"devops/tests", "devops/review"}
-    # #8 asks nobody for a review, so it is not in Waiting for me; Merge shows anyway: his account may merge.
+    # #8 asks nobody for a review, so it is not in Waiting for me; Merge shows anyway: the user's account may merge.
     assert p["can_merge"] is True and pulls[3]["can_merge"] is True
 
 
@@ -103,7 +103,7 @@ def test_merge_hides_where_the_merge_route_would_refuse(tmp_path):
     open_flow_prs(f, st)
     pulls = by_number(pulls_of(tmp_path, f)[1])
     assert (pulls[9]["can_merge"], pulls[10]["can_merge"]) == (False, False)
-    assert pulls[11]["flow"] == "demo" and pulls[11]["can_merge"] is False  # the flow's gate does not wait for him
+    assert pulls[11]["flow"] == "demo" and pulls[11]["can_merge"] is False  # the flow's gate does not wait for the user
     desk.clear_cache()
     assert not any(p["can_merge"] for p in pulls_of(tmp_path, f, owner_token=False)[1]["pulls"])
 
@@ -208,9 +208,9 @@ def test_the_layout_is_list_or_grid_and_the_repo_question_is_drafted():
 
 
 def test_grid_cards_in_one_row_have_one_height_and_the_count_line_at_the_bottom():
-    """Konstantin on the grid (2026-11-12): "Yes, they should match." A badge made a card ~20 px taller than its
+    """Cards in one grid row have one height. A badge made a card ~20 px taller than its
     neighbours. The grid stretches every card of a row, and the count line is pushed to the card's bottom, so the
-    lines align. run-fb3.cjs measures it in both themes at 1280 and 1600 px."""
+    lines align."""
     grid = SOURCE[SOURCE.index("const GRID = {"):SOURCE.index("}", SOURCE.index("const GRID = {"))]
     assert "alignItems: 'stretch'" in grid and "'start'" not in grid
     card = SOURCE[SOURCE.index("function RepoCard("):SOURCE.index("function Repos(")]

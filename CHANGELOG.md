@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.0.25
+
+A review round on security and correctness before the catalog's next review. Update both halves: the plugin where Hermes runs and the one Hermes Desktop loads.
+
+- The mention channel stays off until the profile turns it on (`platforms.forgebruecke` and
+  `platform_toolsets.forgebruecke`). Hermes' token alone used to make the gateway start it, the channel refused, and
+  Desktop showed "Backend forgebruecke down" and Forgebruecke "Disconnected" while everything else worked.
+- The mention channel posts only the answer to a mention, in that mention's thread; cron delivery and
+  send_message to it are refused.
+- The mention channel stays off while its tool list holds the shell, file writes, code, another agent, Hermes'
+  memory or the search of past sessions, and Hermes' command-approval prompt is never posted into a public thread.
+- The settings guard reads `~` and `$HOME` the way the agent's shell does, asks for commands that replace the
+  profile folder by its path (`tar -x -C`, `cp -r`, `rsync`, `rm`, `mv`, `find -delete`) without the word
+  "hermes", and knows `python -m hermes_cli.main` and `hermes import`.
+- The settings guard reads relative paths in the session's folder, following each `cd` it can read, so a
+  project's own `config.yaml` and `.env` no longer ask there; after a change of folder it cannot read they ask
+  as before. Read-only `yq` and copies out of the profile pass.
+- In the profile folder, the folder that holds it and the plugin's own folder, commands that unpack an archive
+  there, remove with a glob (`rm -rf *`), copy into `.` or run a writing command through `xargs` now ask
+  first (and are refused in cron). Reading through `xargs` (`| xargs grep`, `| xargs wc -l`) passes.
+- "Always" on a flow or a protection preset now covers that one plan only.
+- The agent's doctor and `hermes forgebruecke doctor` never send your personal write token; the settings
+  page checks it.
+- Under `plugins.isolation: host` the plugin loads without its mention channel, and a command-line turn
+  there does not write.
+- When this Hermes cannot say whether a person is present, the write refusal says so.
+- The git credential setup no longer adds git's credential cache.
+- A write answered with a web page says it may have landed; an error page that echoes the token no longer
+  passes it on.
+- The settings page saves its switches with `hermes config set`.
+- Review workers get no built-in tools, memory or SOUL.md, Forgebrücke refuses every tool call they make, and they answer their verdict instead of writing a file; a review in the plugin's own profile no longer ends in error.
+- A review gate whose profile does not enable Forgebrücke starts no worker; it ends in an error that names the command to enable it, and the flow warns when it loads.
+- A review worker's summary and findings reach the pull request as plain text: mentions do not ping, links, images and HTML do not render, and issue and commit references do not link.
+- A review answer nested too deeply ends the gate in an error instead of keeping it running.
+- A tick that dies right after starting a review takes that review's answer instead of starting a second one.
+- A comment Forgejo stored but answered with an error is no longer posted again on every tick.
+- A gate that runs again on the same commit (a new flow version or an edited gate) and fails again notifies again.
+- When the gateway loop cannot load its token, the settings page still says the background stopped, and why.
+- The sidebar count reads nothing while Desktop is hidden and no faster than your poll interval.
+- "Load it now" reads Forgebrücke's tokens again without ending the plugin host other plugins share.
+- "Create a reviewer profile" asks first, says what the copy takes, and erases the copy's memories.
+- The desk's Refresh no longer reruns the doctor's write-scope probes.
+- The page opens only http(s) links.
+- The README's disclosures name the review worker's limits, the background ticks and the cron command, the Desktop polling and the reviewer copy.
+
 ## 0.0.24
 
 - Merge shows on every row under Waiting for me that Forgejo lets your account merge into its target branch (your
@@ -80,7 +125,7 @@
 - Rows read `#12 Title`; the line under the title no longer repeats the number.
 - The page is called Forgebrücke (was Forgejo desk), the palette says "Open Forgebrücke", and the headers draw
   the decided mark with its wings, in one colour.
-- The rules on the settings page show their text under each headline, in Konstantin's words: "Forgejo decides
+- The rules on the settings page show their text under each headline, in the maintainer's words: "Forgejo decides
   what Hermes may do" (with the write-token warning) and "You approve the important part".
 - When the Desktop half and Hermes run different versions, the desk and the settings page say so, with the
   update command.

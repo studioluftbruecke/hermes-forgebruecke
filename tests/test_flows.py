@@ -277,7 +277,7 @@ def test_review_process_gone_without_verdict_is_error(tmp_path):
     k.runner.dead.add(1001)
     k.tick()
     assert k.gates()["review"]["state"] == "error"
-    assert "ended without writing a verdict" in k.gates()["review"]["detail"]
+    assert "ended without an answer" in k.gates()["review"]["detail"]
 
 
 def test_verdict_for_another_head_is_error(tmp_path):
@@ -411,9 +411,10 @@ def test_runner_child_env_drops_secrets_and_command_shape():
     assert env == {"PATH": "/bin", "HOME": "/h", "TMPDIR": "/tmp",
                    "HERMES_EPHEMERAL_SYSTEM_PROMPT": runner_mod.REVIEW_SYSTEM}
     assert runner_mod.REVIEW_SYSTEM.startswith(sub("approval").REVIEW_MARKER)
-    cmd = runner_mod.ReviewRunner().command("devops", __import__("pathlib").Path("/p.md"))
-    assert cmd[3:] == ["hermes", "-p", "devops", "chat", "--query-file", "/p.md", "-t", "file", "-Q",
-                       "--max-turns", "12"]
+    cmd = runner_mod.ReviewRunner().command("devops", __import__("pathlib").Path("/p.md"),
+                                            __import__("pathlib").Path("/v.json"))
+    assert cmd[4:] == ["/v.json", "hermes", "-p", "devops", "chat", "--query-file", "/p.md", "-t", "no_mcp",
+                       "--ignore-rules", "-Q", "--max-turns", "3"]
 
 
 # --- the tool ---------------------------------------------------------------------------------------
@@ -489,7 +490,7 @@ def test_list_profiles_reads_the_host_and_a_missing_review_profile_is_a_warning(
     (tmp_path / "config.yaml").write_text("x: 1")
     for name in ("coding", "devops"):
         (tmp_path / "profiles" / name).mkdir(parents=True)
-        (tmp_path / "profiles" / name / "config.yaml").write_text("x: 1")
+        (tmp_path / "profiles" / name / "config.yaml").write_text("plugins:\n  enabled: [forgebruecke]\n")
     (tmp_path / "profiles" / "broken").mkdir()
     assert profile.list_profiles(tmp_path / "profiles" / "coding") == ["coding", "default", "devops"]
     monkeypatch.setattr(profile, "current_home", lambda: tmp_path / "profiles" / "coding")

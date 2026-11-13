@@ -1,4 +1,4 @@
-"""M10: lesson cards in learn mode, riding on the receipts hook."""
+"""Lesson cards in learn mode, riding on the receipts hook."""
 import threading
 
 import pytest

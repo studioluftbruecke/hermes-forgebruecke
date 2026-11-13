@@ -10,16 +10,19 @@ one-use ticket for exactly the plan it sent to the gate, and the handler refuses
 one. A denied or timed-out approval revokes the ticket (``post_approval_response``). With
 ``dry_run`` on, the hook lets the call through without asking and the handler only previews.
 
-Restated from Hermes' own rule (``tools/approval_context.py``, not a public import): a run is
-unattended when it is a cron job, a single-query ``hermes chat -q``/``-z`` run, or a session on the
-webhook, msgraph_webhook or api_server surface. ``hermes -z`` auto-approves inside Hermes' gate,
-which is why this check runs first.
+Restated from Hermes' own rule (not a public import): a run is unattended when it is a cron job, a
+single-query ``hermes chat -q``/``-z`` run, or a session on the webhook, msgraph_webhook or api_server
+surface, or on this plugin's own mention channel. Inside Hermes' plugin host (``plugins.isolation:
+host``) the process environment is the host's, so a command-line surface counts as unattended there.
+When Hermes cannot say whether a turn is a single-query one, writes are refused. ``hermes -z``
+auto-approves inside Hermes' gate, which is why this check runs first.
 """
 from __future__ import annotations
 
 import fnmatch
 import hashlib
 import importlib
+import itertools
 import json
 import os
 import re
@@ -48,14 +51,19 @@ def _truthy(value: Any) -> bool:
     return str(value or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+HOST_ONESHOT_SURFACES = frozenset({"", "cli", "oneshot"})  # what a `-z` or `-q` turn reports in the plugin host
+
+
 class RunContext:
     def __init__(self, cron: bool = False, single_query: bool = False, platform: str = "",
                  unknown: bool = False, chat_id: str = "", source: str = "", *,
-                 origin_unknown: bool = False) -> None:
+                 origin_unknown: bool = False, host_oneshot: bool = False) -> None:
         self.cron, self.single_query, self.platform = cron, single_query, (platform or "").strip().lower()
         self.source = (source or "").strip().lower()
         self.origin_unknown = origin_unknown  # the session's surface could not be read: who started the turn?
+        self.version_silent = unknown  # this Hermes does not say whether the turn is a single-query one
         self.unknown = unknown or origin_unknown  # no telling whether a person is present: fail closed
+        self.host_oneshot = host_oneshot
         self.chat_id = chat_id or ""
 
     def lane(self) -> "tuple[str, str]":
@@ -67,9 +75,14 @@ class RunContext:
         return "agent", ""
 
     def unattended_reason(self) -> Optional[str]:
-        if self.unknown:
-            return ("Forgebrücke cannot tell whether a person is present (it cannot read this Hermes "
-                    "session; update Forgebrücke)")
+        if self.origin_unknown:
+            return "Forgebrücke cannot tell whether a person is present (it cannot read who started this turn)"
+        if self.version_silent:
+            return ("Forgebrücke cannot tell whether a person is present: this Hermes version does not say, so "
+                    "writes are refused (update Forgebrücke)")
+        if self.host_oneshot:
+            return ("this turn runs in Hermes' plugin host from the command line, where Forgebrücke cannot see "
+                    "whether a person is present (plugins.isolation: in_process brings the approval card back)")
         if self.cron:
             return "this is a cron job"
         if self.single_query:
@@ -106,10 +119,9 @@ def _review_worker() -> bool:
 def _finite_turn() -> Optional[bool]:
     """True on a gateway-admitted ``chat -q``/``-z`` turn; None when the marker cannot be read.
 
-    A private Hermes seam (no public API says "single-query" for a daemon turn, which never carries
-    HERMES_SINGLE_QUERY_SESSION). If it moves, writes are refused rather than left to Hermes' gate,
-    which auto-approves single-query runs."""
+    If it moves, writes are refused rather than left to Hermes' gate, which auto-approves single-query runs."""
     try:
+        # Private on purpose: Hermes 0.23.1 has no public signal for a gateway-admitted `chat -q`/`-z` turn.
         from gateway.session_finite import finite_turn_required
     except ImportError:
         return None
@@ -129,14 +141,19 @@ def run_context_from(ctx) -> RunContext:
     finite = _finite_turn()
     single = bool(finite) or _truthy(_session_env("HERMES_SINGLE_QUERY_SESSION"))
     origin_unknown = False
+    surface: Optional[str] = None
     try:
-        platform = ctx.session_surface() or _session_env("HERMES_SESSION_PLATFORM")
+        surface = str(ctx.session_surface() or "").strip().lower()
+        platform = surface or _session_env("HERMES_SESSION_PLATFORM")
     except Exception:
         platform = _session_env("HERMES_SESSION_PLATFORM")
         origin_unknown = not platform
+    # In the plugin host the environment is the host's: only the surface ctx forwards tells a `-z` turn apart.
+    in_host = os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1"
+    host_oneshot = in_host and (surface is None or surface in HOST_ONESHOT_SURFACES)
     return RunContext(cron, single, platform, unknown=finite is None, chat_id=_session_env("HERMES_SESSION_CHAT_ID"),
                       source=REVIEW_SOURCE if _review_worker() else _session_env("HERMES_SESSION_SOURCE"),
-                      origin_unknown=origin_unknown)
+                      origin_unknown=origin_unknown, host_oneshot=host_oneshot)
 
 
 class ApprovalTickets:
@@ -216,6 +233,9 @@ def _block(body: dict) -> dict:
     return {"action": "block", "message": text}
 
 
+_STANDING_PLANS = frozenset({("forgejo_flows", "set"), ("forgejo_flows", "resume"), ("forgejo_repos", "preset")})
+
+
 def make_gate(load_access: Callable[[], Any], run_context: Callable[[], RunContext],
               tickets: ApprovalTickets = TICKETS, extra: Optional[dict] = None):
     """``extra`` maps more tool names to a spec with ``gated(args)``, ``plan(access, args)`` and
@@ -247,9 +267,13 @@ def make_gate(load_access: Callable[[], Any], run_context: Callable[[], RunConte
             return _block(_refusal("internal", type(e).__name__))
         if access.settings.dry_run:
             return None  # the handler previews; nothing to approve
-        # "Always" in Hermes covers every later call with this key, so the key names the action too.
+        # "Always" in Hermes covers every later call with this key, so the key names the action too. A flow and
+        # a protection preset decide what runs unattended later, so their key also names the plan itself.
         action = p.extra.get("action")
         rule_key = f"{RULE_NS}{tool_name}:{action}:{p.repo}" if action else f"{RULE_NS}{tool_name}:{p.repo}"
+        if (tool_name, action) in _STANDING_PLANS:
+            plan = json.dumps({"extra": p.extra, "text": p.preview}, sort_keys=True, default=str)
+            rule_key += ":" + hashlib.sha256(plan.encode("utf-8")).hexdigest()[:12]
         tickets.issue(key, p.signature(), rule_key)
         return {"action": "approve", "message": p.approval_text("Hermes' account"),
                 "rule_key": rule_key}
@@ -313,7 +337,16 @@ def run_write(tool: str, args: dict, session_id: Any, load_access: Callable[[], 
 # A shell command is judged in two steps. First: can it write? It cannot when every part of its pipeline is
 # a reader (_READERS, _SUBCOMMAND_READERS) without a writing argument and nothing is redirected into a file.
 # One part that may write makes the whole command one that may write. Code for execute_code is never a
-# reader. Second, only for a command that may write: where do the names in it point (_named)?
+# reader. Second, only for a command that may write: where do the names in it point (_named)? A relative name
+# is read in the folder the call starts in (SessionFolders); when that folder is unknown, it may be the profile.
+#
+# A folder above a guarded place (a holder: the profile folder, the gateway's HOME, a checkout the profile loads
+# the plugin from) counts in two cases. A command replaces it: the folder of `tar -x -C`/`unzip -d`, the target
+# of `cp -r` and `rsync`, what `rm`, `mv` or `find -delete` remove (_replaced), or the start folder itself when
+# `tar -x` names no folder. Or the command is read the strict way, as the released guard read every command
+# with a `workdir`, a change of folder or one of its words (_HINTS: hermes, forgebruecke, plugin-data,
+# config.yaml, .env, a settings key): then any holder it names counts. A holder that is only a read source or
+# a tool's working folder (`git -C`, `make -C`, `npm --prefix`) in a command without those words does not.
 
 GUARDED_TOOLS = ("write_file", "patch", "terminal", "execute_code")
 PLUGIN_DIR = "forgebruecke"
@@ -338,6 +371,7 @@ _READERS: dict = {
     "uniq": re.compile(r"[^-].*", re.S),  # reads only as a filter: a second file name would be its output
     "sed": re.compile(r"-[a-zA-Z]*[if].*|.*(?:^|[^\w.-])[wWe](?:\s+\S|$).*", re.S),
     "awk": re.compile(r"-[if].*|.*(?:>|\||system).*", re.S),
+    "yq": re.compile(r"-[a-zA-Z]*[is].*", re.S),  # -i edits in place, -s splits into files
 }
 # Long options that write, per command. GNU tools take any unambiguous start of a long option (`sed --in`
 # is `--in-place`), so an argument counts when its name is the start of one of these.
@@ -347,6 +381,7 @@ _LONG_WRITERS: dict = {
     "awk": ("include", "file", "load"),
     "git": ("output", "open-files-in-pager", "config-env", "git-dir", "work-tree"),
     "docker-compose": ("output",),
+    "yq": ("inplace", "split-exp"),
 }
 # These read only with one of the named subcommands: (their options that take a value, the subcommands, a
 # writing argument). `git add` and `git commit` write inside .git only, unless --git-dir or --work-tree
@@ -368,8 +403,9 @@ _QUOTES = str.maketrans("", "", "'\"")
 _SHELL_VAR_RE = re.compile(r"\$(\{)?(HERMES_HOME|HOME|OLDPWD|PWD)(?(1)(?::?[-=?][^}]*)?\}|(?![A-Za-z0-9_]))")
 # A change of folder anywhere in the text: after one, the folder the call started in proves nothing. `-C` with
 # a relative folder (`git -C ../x`, `make -C sub`) moves too; with an absolute one its words are read there.
-_MOVE_RE = re.compile(r"(?<![\w./-])(?:cd|pushd|popd)(?![\w./-])|OLDPWD|(?<![\w-])-C(?!\s*['\"]?[/~$])")
-_LEADING_CD_RE = re.compile(r"\s*cd\s+(\S+)\s*&&")
+_CD_RE = re.compile(r"(?<![\w./-])(?:cd|pushd|popd)(?![\w./-])|OLDPWD")
+_MOVE_RE = re.compile(_CD_RE.pattern + r"|(?<![\w-])-C(?!\s*['\"]?[/~$])")
+_LEADING_CD_RE = re.compile(r"\s*cd\s+(\S+)\s*(?:&&|$)")
 # After one of these a part of the command runs although the `cd` before it failed, or in another shell.
 _RUNS_ANYWAY_RE = re.compile(r"[;\n()]|\|\||(?<![&>])&(?![&>])")
 # Between `hermes` and its verb: flags, each with at most one value (`--yolo`, `-p coding`).
@@ -377,20 +413,25 @@ _HERMES_FLAGS = r"(?P<flags>(?:\s+--?\w[\w-]*(?:=\S+)?(?:\s+[^\s-]\S*)?)*)\s+"
 _HERMES_READ_RE = re.compile(r"hermes" + _HERMES_FLAGS
                              + r"(?:config\s+(?:get|show|path|env-path)|plugins\s+(?:list|show))\b")
 # One `hermes` call that changes settings: the profile it names (if any), and for a plugins or tools verb its
-# arguments. `plugins update` replaces the loaded code; `tools enable` sets what a platform's turns may use.
-_HERMES_CALL_RE = re.compile(r"\bhermes\b" + _HERMES_FLAGS + r"(?:config\s+(?:set|unset|edit|migrate|reset)\b|"
+# arguments. `plugins update` replaces the loaded code; `tools enable` sets what a platform's turns may use;
+# `import` restores config.yaml and .env from a backup zip. The module form (`python -m hermes_cli.main`) is the
+# same command.
+_HERMES_CALL_RE = re.compile(r"(?:\bhermes(?![\w.-])|\bhermes_cli(?:\.main)?(?![\w.]))" + _HERMES_FLAGS
+                             + r"(?:import\b|config\s+(?:set|unset|edit|migrate|reset)\b|"
                              r"plugins\s+(?:disable|enable|install|remove|uninstall|update)\b(?P<plugin>[^|;&\n]*)|"
                              r"tools\s+(?:enable|disable)\b(?P<tools>[^|;&\n]*))")
 _PROFILE_FLAG_RE = re.compile(r"(?:-p|--profile)(?:\s+|=)([\w.-]+)")
 _MENTION_TOOLS_RE = re.compile(r"--platform(?:\s+|=)" + MENTION_PLATFORM + r"\b")
 # The page's routes that change something on the user's click (dashboard/plugin_api.py): save a setting, merge
-# or comment with the user's own token, create a reviewer profile, restart the profile's plugin host, park and
+# or comment with the user's own token, create a reviewer profile, reload Forgebrücke's tokens, park and
 # unpark a pull request. `/settings` and `/desk` only read.
 _PAGE_ROUTE_RE = re.compile(rf"/api/plugins/{PLUGIN_DIR}/"
                             r"(setting|merge|comment|reviewer-profile|reload-tokens|park|unpark)(?![\w-])")
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
+# The released guard's words: a shell command that holds one of them is read the strict way (_named_once).
+_HINTS = (PLUGIN_DIR, PLUGIN_ROOT.name.lower(), "plugin-data", "hermes", *_SETTINGS_FILES, *_SETTINGS_KEYS)
 
 
 def _code_roots(home: Optional[Path]) -> list:
@@ -452,30 +493,47 @@ def _is_plugin_data(path: Path, home: Optional[Path]) -> bool:
     return any(marker in spelling for spelling in _spellings(path) for marker in markers)
 
 
-def _expand_vars(text: str, home: Path) -> str:
+def _user_homes(home: Optional[Path]) -> list:
+    """What `~` and `$HOME` may mean in the agent's shell. In a container Hermes gives agent shells the profile's
+    own home folder (`<profile>/home`, when it exists); elsewhere they keep the process HOME. Both are checked."""
+    homes = [str(Path.home())]
+    if home is not None and (Path(home) / "home").is_dir():
+        homes.append(str(Path(home) / "home"))
+    return homes
+
+
+def _tilde(word: str, user_home: str) -> str:
+    """`~` and `~/...` with ``user_home``; `~user/...` as the system names it."""
+    if word == "~" or word.startswith("~/"):
+        return user_home + word[1:]
+    return os.path.expanduser(word)
+
+
+def _expand_vars(text: str, home: Path, user_home: str) -> str:
     """`$HERMES_HOME` and `$HOME` written out (also with a default, `${HERMES_HOME:-...}`). `$PWD` and `$OLDPWD`
     become `.`, a relative path like any other (a move of folder already makes the start folder unknown)."""
-    values = {"HERMES_HOME": str(home), "HOME": str(Path.home()), "PWD": ".", "OLDPWD": "."}
+    values = {"HERMES_HOME": str(home), "HOME": user_home, "PWD": ".", "OLDPWD": "."}
     return _SHELL_VAR_RE.sub(lambda m: values[m.group(2)], text)
 
 
-def _expand(word: str, home: Path) -> str:
-    return os.path.expanduser(_expand_vars(word, home))
+def _expand(word: str, home: Path, user_home: str) -> str:
+    return _tilde(_expand_vars(word, home, user_home), user_home)
 
 
-def _start_folder(command: str, workdir: Any, home: Path) -> str:
+def _start_folder(command: str, workdir: Any, home: Path, user_home: str, moves_re: "re.Pattern" = _MOVE_RE) -> str:
     """The folder every part of a shell command runs in, or "" when its text cannot tell.
 
     That is the call's absolute workdir when nothing in the text changes folder. One `cd` may lead: in
     `cd <folder> && ...` the rest runs only there, as long as no `;`, newline, `||`, single `&` or bracket
-    follows, after which a part runs although the `cd` failed."""
-    folder = os.path.expanduser(str(workdir or ""))
-    moves = len(_MOVE_RE.findall(command))
+    follows, after which a part runs although the `cd` failed. With ``moves_re=_CD_RE`` it is the shell's
+    folder, which a tool's own `-C` does not move."""
+    folder = _tilde(str(workdir or ""), user_home)
+    moves = len(moves_re.findall(command))
     if moves:
         lead = _LEADING_CD_RE.match(command)
         if not lead or moves > 1 or _RUNS_ANYWAY_RE.search(command, lead.end()):
             return ""
-        target = _expand(lead.group(1).translate(_QUOTES), home)
+        target = _expand(lead.group(1).translate(_QUOTES), home, user_home)
         if target.startswith(("-", "~")) or "$" in target or "`" in target:
             return ""
         folder = os.path.join(folder, target)
@@ -499,7 +557,7 @@ def _braces(word: str, limit: int = 64) -> list:
     return out + todo
 
 
-def _words(flat: str) -> set:
+def _words(flat: str, user_home: str) -> set:
     """The path words of a command: braces written out, commas split, `~` expanded. `{}` belong to a word only
     for `${...}`, already written out; a brace at an end is awk's or find's (`{print > "config.yaml"}`)."""
     out = set()
@@ -508,7 +566,7 @@ def _words(flat: str) -> set:
             for part in whole.split(","):
                 part = part.strip("{}")
                 if part:
-                    out.add(os.path.expanduser(part))
+                    out.add(_tilde(part, user_home))
     return out
 
 
@@ -528,44 +586,94 @@ class _Targets:
         self.code = set().union(*(_spellings(r) for r in _code_roots(home)))
         self.holders = {str(parent) for s in self.files | self.data | self.code
                         for parent in Path(s).parents if str(parent) != "/"}
+        self.roots = _code_roots(home)
 
     def glob(self, pattern: str) -> set:
-        """Which kinds a glob pattern (absolute, lowercased) can name."""
+        """Which kinds a glob pattern (absolute, lowercased) can name. As in the shell, `*` and `?` stay inside
+        one folder name; a pattern that ends in a folder above a guarded place names that folder."""
         kinds = (("settings", self.files), ("data", self.data), ("code", self.code), ("holder", self.holders))
-        return {kind for kind, spellings in kinds if any(fnmatch.fnmatchcase(s, pattern) for s in spellings)}
+        parts = pattern.split("/")
+        return {kind for kind, spellings in kinds
+                if any(_glob_hit(s.split("/"), parts) for s in spellings)}
+
+    def at(self, place: str, home: Path) -> set:
+        """Which kinds an absolute path (or glob) names, holders included."""
+        if _GLOB_CHARS.intersection(place):
+            return self.glob(os.path.normpath(place).lower())
+        path, spellings = Path(place), _spellings(Path(place))
+        return {kind for kind, hit in (
+            ("code", _is_plugin_code(path, home)), ("data", _is_plugin_data(path, home)),
+            ("settings", bool(spellings & self.files)), ("holder", bool(spellings & self.holders))) if hit}
+
+    def names(self) -> set:
+        """Every file and folder name a guarded place or a holder has, the loaded code's own files included."""
+        out = {Path(s).name for s in self.files | self.data | self.code | self.holders}
+        for root in self.roots:  # Python's caches below the code are no guardrail
+            for _, folders, files in itertools.islice(os.walk(root), 200):
+                out.update(n.lower() for n in folders + files if n != "__pycache__" and not n.endswith(".pyc"))
+        return out
 
 
-def _named(text: str, home: Optional[Path], workdir: Any = None) -> Optional[str]:
+def _glob_hit(name: list, pattern: list) -> bool:
+    return len(name) == len(pattern) and all(fnmatch.fnmatchcase(n, p) for n, p in zip(name, pattern))
+
+
+def _named(text: str, home: Optional[Path], workdir: Any = None, session: Any = None, shell: bool = False
+           ) -> Optional[str]:
+    """What of this profile a command or script names, read with each meaning `~` may have in the agent's shell."""
+    if home is None:
+        return _named_once(text, None, workdir, str(Path.home()))
+    found = {_named_once(text, Path(home), workdir, user_home, session, shell) for user_home in _user_homes(home)}
+    return next((kind for kind in _KINDS if kind in found), None)
+
+
+_KINDS = ("code", "data", "settings", "holder")
+
+
+def _named_once(text: str, home: Optional[Path], workdir: Any, user_home: str, session: Any = None,
+                shell: bool = False) -> Optional[str]:
     """What of this profile a command or script names: "code", "data", "settings", "holder" or None.
 
-    A known start folder is exact: a relative word means start/word. Every absolute word is a folder too
-    (`git -C`, `cd`), so a relative word is also read against each. An unknown start folder may be the
-    profile, so a relative name the settings path ends with counts, and so does a relative path into the
+    A shell command counts for what it replaces (_replaced), and, read the strict way (see _HINTS), for every
+    place it names. A known start folder is exact: a relative word means start/word. Every absolute word is a
+    folder too (`git -C`, `cd`), so a relative word is also read against each. An unknown start folder may be
+    the profile, so a relative name the settings path ends with counts, and so does a relative path into the
     plugin's data folder. A relative path into the plugin's code from an unknown folder does not: that is
-    every test run and `git add` of a checkout of this plugin. The start folder itself is no holder: a
-    command may work in the profile folder without touching what the guard watches."""
+    every test run and `git add` of a checkout of this plugin. The folder the call itself names to work in (its
+    `workdir`, a leading `cd`) is no holder when named again: a command may work in the profile folder without
+    touching what the guard watches. The session's folder only places relative names."""
     flat = text.translate(_QUOTES)
     if home is None:  # any profile's
         low = flat.lower()
         return ("code" if str(PLUGIN_ROOT).lower() in low else "data" if any(f in low for f in _DATA_FOLDERS)
                 else "settings" if any(n in low for n in _SETTINGS_FILES) else None)
     home = Path(home)
-    start = _start_folder(text, workdir, home)
-    words = _words(_expand_vars(flat, home)) | ({start} if start else set())
+    targets = _Targets(home)
+    readable = not shell or _names_readable(text, scripts=False)  # a hidden `cd` (`c\d`, `'c'd`): start unknown
+    start = _start_folder(text, workdir or session, home, user_home) if readable else ""
+    shell_start = _start_folder(text, workdir or session, home, user_home, _CD_RE) if shell and readable else ""
+    found = _replaced_kinds(text, home, user_home, shell_start, targets) if shell else set()
+    moves = bool(_MOVE_RE.search(text))
+    if shell and not (workdir or moves or any(h in text.lower() for h in _HINTS)):
+        return next((kind for kind in _KINDS if kind in found), None)
+    written = _written_only(text) if shell else None
+    if written is not None:  # a lone `cp` or `tar c` is read for the place it writes
+        text, flat = written, written.translate(_QUOTES)
+    own = start if (workdir or moves) else ""  # the folder the call names to work in
+    words = _words(_expand_vars(flat, home, user_home), user_home) | ({own} if own else set())
     plain = {w for w in words if not _GLOB_CHARS.intersection(w)}
     variants = {w: _variants(Path(w)) for w in plain if os.path.isabs(w)}
-    folders = set().union(*variants.values())
-    targets = _Targets(home)
-    at_start = _spellings(Path(start)) if start else set()
+    named_folders = set().union(*variants.values())
+    folders = named_folders | (_variants(Path(start)) if start else set())
+    at_start = _spellings(Path(own)) if own else set()
     hints = (PLUGIN_DIR, PLUGIN_ROOT.name.lower())
-    found = set()
 
     # A folder only `mkdir` names is made, not replaced (`mkdir -p $HERMES_HOME/plugins` before linking another
     # plugin). Named by any other part of the command too, it counts.
     made: dict = {}
     for part in _pipeline(text) or []:
         for arg in part[1:]:
-            key = os.path.normpath(_expand(arg, home)).lower()
+            key = os.path.normpath(_expand(arg, home, user_home)).lower()
             made[key] = made.get(key, True) and part[0].rpartition("/")[2] == "mkdir"
     only_made = {k for k, v in made.items() if v}
 
@@ -600,8 +708,177 @@ def _named(text: str, home: Optional[Path], workdir: Any = None) -> Optional[str
             ("data", any(_is_plugin_data(p, home) for p in places) or (not start and _relative_data(word))),
             ("settings", any(_spellings(p) & targets.files for p in places)
              or (not start and any(f.endswith(tail) for f in targets.files))),
-            ("holder", any(holder(_spellings(p)) for p in places))) if hit)
-    return next((kind for kind in ("code", "data", "settings", "holder") if kind in found), None)
+            ("holder", any(holder(_spellings(Path(os.path.join(f, word)))) for f in named_folders))) if hit)
+    return next((kind for kind in _KINDS if kind in found), None)
+
+
+# Commands that replace what lies in the folders they are given (_replaced). A wrapper runs the command after it.
+_REMOVERS = frozenset({"rm", "rmdir", "unlink", "shred"})
+_WRAPPERS = frozenset({"sudo", "doas", "env", "nice", "nohup", "time", "command", "builtin", "exec"})
+_ASSIGNMENT_RE = re.compile(r"[A-Za-z_]\w*=")
+_FIND_ACTIONS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir"})
+
+
+def _commands(command: str) -> Optional[list]:
+    """Each simple command of a shell text as its words: leading assignments and wrappers dropped, the file
+    after a redirect dropped. None when the text cannot be split."""
+    text = _HARMLESS_REDIRECT_RE.sub(" ", command).replace("\\\n", " ").replace("\n", " ; ")
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    parts, words, skip = [], [], False
+    for token in tokens:
+        if skip:
+            skip = False
+        elif token and _SHELL_OPERATORS.issuperset(token):
+            skip = bool(set(token) & set("<>"))
+            if not skip:
+                parts.append(words)
+                words = []
+        else:
+            words.append(token)
+    parts.append(words)
+    out = []
+    for words in parts:
+        while words and (_ASSIGNMENT_RE.match(words[0]) or words[0].rpartition("/")[2] in _WRAPPERS):
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                words = words[1:]
+        if words:
+            out.append(words)
+    return out
+
+
+def _replaced(command: str) -> "tuple[list, bool]":
+    """What a shell command writes over or removes: ``(word, names)`` pairs, where ``names`` are the entries it
+    writes into the folder ``word`` (`cp report.md ~` writes ~/report.md, not ~) and None means the place as a
+    whole; and whether it unpacks into the folder it runs in (`tar -x` or `unzip` without a folder)."""
+    out, here = [], False
+    for words in _commands(command) or []:
+        name, args = words[0].rpartition("/")[2], words[1:]
+        plain = [a for a in args if not a.startswith("-") or a == "-"]
+        if name in ("xargs", "parallel"):  # its arguments come from the input: every word may be one
+            inner = _xargs_command(args)
+            if inner and not _part_reads(inner):
+                out += [(w, None) for part in _commands(command) or [] for w in part[1:] if not w.startswith("-")]
+        elif name in _REMOVERS:
+            out += [(w, None) for w in plain]
+        elif name in ("cp", "mv", "ln", "install"):
+            out += _copied(name, args)
+        elif name == "rsync" and len(plain) >= 2:
+            out.append((plain[-1], None))
+        elif name == "tar" and _tar_extracts(args):
+            folder = _option_value(args, ("-C", "--directory"))
+            here = here or folder is None
+            out += [(folder, None)] if folder else []
+        elif name == "unzip" and not {"-l", "-t", "-v", "-Z"} & set(args):
+            folder = _option_value(args, ("-d",))
+            here = here or folder is None
+            out += [(folder, None)] if folder else []
+        elif name == "find" and _FIND_ACTIONS & set(args):
+            paths = list(itertools.takewhile(lambda a: not a.startswith(("-", "(", "!", ")")), args))
+            out += [(p, _find_names(args)) for p in paths or ["."]]
+    return out, here
+
+
+# xargs and parallel options that take the next word as their value.
+_XARGS_VALUED = frozenset({"-I", "-n", "-P", "-L", "-l", "-s", "-d", "-E", "-e", "-a", "-j", "--arg-file",
+                           "--delimiter", "--max-args", "--max-procs", "--max-lines", "--max-chars", "--jobs"})
+
+
+def _xargs_command(args: list) -> list:
+    """The command xargs or parallel runs, as words: [] when none is named (xargs then runs `echo`)."""
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in _XARGS_VALUED else 1
+    return args[i:]
+
+
+def _copied(name: str, args: list) -> list:
+    """The places `cp`, `mv`, `ln` or `install` write. A folder target as a whole only when `cp -r` copies into it
+    or a source is a glob; else the entries named after each source. `mv` also removes its sources."""
+    folder = _option_value(args, ("-t", "--target-directory"))
+    plain, skip = [], False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg in ("-t", "--target-directory", "-S", "--suffix", "-m", "--mode", "-o", "--owner", "-g", "--group"):
+            skip = True
+        elif not arg.startswith("-") or arg == "-":
+            plain.append(arg)
+    if folder is None:
+        if len(plain) < 2:
+            return []
+        folder, sources = plain[-1], plain[:-1]
+    else:
+        sources = plain
+    flags = "".join(a[1:] for a in args if a.startswith("-") and not a.startswith("--"))
+    whole = name == "cp" and (bool(set(flags) & set("rRa")) or "--recursive" in args or "--archive" in args)
+    whole = whole or any(_GLOB_CHARS.intersection(s) for s in sources)
+    out = [(s, None) for s in sources] if name == "mv" else []
+    names = None if whole else tuple(os.path.basename(s.rstrip("/")) or s for s in sources)
+    return out + [(folder, names)]
+
+
+def _option_value(args: list, options: tuple) -> Optional[str]:
+    """The value of the last of ``options`` in ``args`` (`-C dir`, `--directory=dir`), or None."""
+    value = None
+    for i, arg in enumerate(args):
+        if arg in options and i + 1 < len(args):
+            value = args[i + 1]
+        for option in options:
+            if option.startswith("--") and arg.startswith(option + "="):
+                value = arg.split("=", 1)[1]
+    return value
+
+
+def _tar_extracts(args: list) -> bool:
+    first = args[0] if args else ""
+    return (("x" in first and not first.startswith("-"))
+            or any(a.startswith("-") and not a.startswith("--") and "x" in a for a in args)
+            or bool({"--extract", "--get"} & set(args)))
+
+
+class _OnlyNamed(tuple):
+    """The name patterns a `find` expression requires of every entry it acts on."""
+
+
+def _find_names(args: list) -> "Optional[_OnlyNamed]":
+    """The `-name`/`-iname` patterns of a `find` expression, or None when it may act on any entry (no such test,
+    or an `-o`, a `!` or a path test)."""
+    if {"-o", "-or", "!", "-not", "-path", "-wholename", "-regex", "-iregex", "-ipath"} & set(args):
+        return None
+    names = [args[i + 1].lower() for i, a in enumerate(args[:-1]) if a in ("-name", "-iname")]
+    return _OnlyNamed(names) if names else None
+
+
+def _replaced_kinds(command: str, home: Path, user_home: str, start: str, targets: _Targets) -> set:
+    """Which kinds the places a shell command replaces are (_replaced), relative ones read in the shell's folder
+    ``start`` (`tar -C rel` too), or in each folder the command names when that is unknown."""
+    replaced, here = _replaced(command)
+    named = {w for w in _words(_expand_vars(command.translate(_QUOTES), home, user_home), user_home)
+             if os.path.isabs(w) and not _GLOB_CHARS.intersection(w)}
+    bases = [start] if start else sorted(named)
+    found = targets.at(start, home) if here and start else set()
+    for word, names in replaced:
+        word = _expand(word, home, user_home)
+        for place in [word] if os.path.isabs(word) else [os.path.join(b, word) for b in bases]:
+            place = os.path.normpath(place)
+            if isinstance(names, _OnlyNamed):  # `find -name x -delete` spares every other name
+                guarded = targets.names()
+                if any(fnmatch.fnmatchcase(n, pattern) for n in guarded for pattern in names):
+                    found |= targets.at(place, home)
+            elif names is None:
+                found |= targets.at(place, home)
+            elif os.path.isdir(place) or word.endswith("/"):
+                found |= set().union(*(targets.at(os.path.join(place, n), home) for n in names))
+            else:
+                found |= targets.at(place, home)
+    return found
 
 
 def _names_settings_key(lowered: str, tool_name: str) -> bool:
@@ -717,42 +994,227 @@ _WHAT = {
     "park": "parks a pull request on Forgebrücke's desk through its page route",
     "unpark": "brings a parked pull request back through Forgebrücke's page route",
     "reviewer-profile": "creates a reviewer profile through Forgebrücke's page route",
-    "reload-tokens": "restarts this profile's plugin host through Forgebrücke's page route",
+    "reload-tokens": "reloads Forgebrücke's tokens through Forgebrücke's page route",
     "holder": "runs a command that can change a folder that holds Forgebrücke's settings, data or code",
 }
-_HINTS = (PLUGIN_DIR, PLUGIN_ROOT.name.lower(), "plugin-data", "hermes", *_SETTINGS_FILES, *_SETTINGS_KEYS)
 
 
-def settings_touch(tool_name: str, args: Any, home: Optional[Path]) -> Optional[str]:
+# `cp` and `tar` (creating an archive) read their sources and write one place. With only these options, the
+# written place is all that counts; any other option (`--remove-files`, `-t`, `--suffix`) leaves the whole
+# command to the usual reading. So does a `cp` that may leave a link to its source: `-s`, `-l`, `-P`, `-d`, `-a`,
+# or `-r` without `-L` (it copies a linked folder, such as the profile's plugin link, as a link), as a write
+# through the link would change the source.
+_CP_FLAGS = frozenset("RrpfinvuxLHT")
+_CP_LONG = frozenset({"--recursive", "--force", "--verbose", "--update", "--no-clobber", "--interactive",
+                      "--dereference", "--parents", "--preserve", "--one-file-system"})
+_TAR_FLAGS = frozenset("czjJvp")
+_TAR_LONG = frozenset({"--create", "--gzip", "--bzip2", "--xz", "--zstd", "--verbose", "--exclude-vcs"})
+
+
+def _cp_written(args: list) -> Optional[list]:
+    plain = []
+    for arg in args:
+        if arg.startswith("--") and len(arg) > 2:
+            if arg not in _CP_LONG and not arg.startswith(("--preserve=", "--no-preserve=")):
+                return None
+        elif arg.startswith("-") and len(arg) > 1:
+            if not set(arg[1:]) <= _CP_FLAGS:
+                return None
+        else:
+            plain.append(arg)
+    flags = "".join(a[1:] for a in args if a.startswith("-") and not a.startswith("--"))
+    recursive = bool(set(flags) & set("rR")) or "--recursive" in args
+    if recursive and "L" not in flags and "--dereference" not in args:
+        return None
+    return [plain[-1]] if len(plain) >= 2 else None
+
+
+def _tar_written(args: list) -> Optional[list]:
+    args, archive, create = list(args), None, False
+    if args and not args[0].startswith("-"):  # the old form: `tar czf ARCHIVE ...`
+        letters = args.pop(0)
+        if not set(letters) <= _TAR_FLAGS | {"f"} or letters.count("f") > 1:
+            return None
+        create = "c" in letters
+        if "f" in letters:
+            if not args:
+                return None
+            archive = args.pop(0)
+    while args:
+        arg = args.pop(0)
+        if arg in ("-C", "--directory", "-f", "--file"):
+            if not args:
+                return None
+            value = args.pop(0)
+            archive = value if arg in ("-f", "--file") else archive
+        elif arg.startswith("--file="):
+            archive = arg.split("=", 1)[1]
+        elif arg.startswith(("--directory=", "--exclude=")) or arg in _TAR_LONG:
+            create = create or arg == "--create"
+        elif arg.startswith("-") and len(arg) > 1 and not arg.startswith("--"):
+            letters = arg[1:]
+            if not set(letters) <= _TAR_FLAGS | {"f"} or ("f" in letters and not letters.endswith("f")):
+                return None
+            create = create or "c" in letters
+            if letters.endswith("f"):
+                if not args:
+                    return None
+                archive = args.pop(0)
+        elif arg.startswith("-"):
+            return None
+    if not create or archive is None:
+        return None
+    return [] if archive == "-" else [archive]
+
+
+def _written_only(command: str) -> Optional[str]:
+    """For a lone `cp` or `tar c` with known options, the places it writes as a command text; else None."""
+    parts = _pipeline(command)
+    if not parts or len(parts) != 1:
+        return None
+    words = parts[0]
+    name = words[0].rpartition("/")[2]
+    written = _cp_written(words[1:]) if name == "cp" else _tar_written(words[1:]) if name == "tar" else None
+    return None if written is None else " ".join(shlex.quote(w) for w in written)
+
+
+# Command names that can change the shell's folder without a `cd` in the text: a script read into the shell, or
+# text run as a command. Shell words that only lead to the command name stay before it.
+_FOLDER_UNSEEN = frozenset({"source", ".", "eval", "exec", "alias"})
+_SHELL_WORDS = frozenset({"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for", "case", "esac",
+                          "select", "function", "time", "!", "{", "}"})
+_PLAIN_NAME_RE = re.compile(r"[\w./+:@%\[-]+")
+
+
+def _names_readable(command: str, scripts: bool = True) -> bool:
+    """Whether the guard can read every command name in a shell text: each is a plain word (no quote, backslash or
+    `$`, which can spell `cd` as `c\\d`, `'c'd` or `$go`) and, with ``scripts``, none can change the folder unseen
+    (the folder for the session's next call; within a call the released guard trusted `source .env && ...`)."""
+    words = _raw_words(command)
+    if words is None:
+        return False
+    first = True
+    for word in words:
+        if word in _SHELL_OPERATORS or word == "\n":
+            first = word not in "<>"  # after a redirect comes its file
+        elif first and not (_ASSIGNMENT_RE.match(word) or word in _SHELL_WORDS):
+            if not _PLAIN_NAME_RE.fullmatch(word) or (scripts and word in _FOLDER_UNSEEN):
+                return False
+            first = False
+    return True
+
+
+def _raw_words(command: str) -> Optional[list]:
+    """The words of a shell text as written (quotes and backslashes kept) and its operators, one character each;
+    None when a quote is left open."""
+    out, word, quote, i = [], "", "", 0
+    text = command.replace("\\\n", " ")
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and quote != "'" and i + 1 < len(text):
+            word, i = word + text[i:i + 2], i + 2
+            continue
+        if quote:
+            quote = "" if c == quote else quote
+            word += c
+        elif c in "'\"":
+            quote, word = c, word + c
+        elif c.isspace() or c in _SHELL_OPERATORS:
+            out += [word] if word else []
+            out += [c] if c == "\n" or c in _SHELL_OPERATORS else []
+            word = ""
+        else:
+            word += c
+        i += 1
+    return None if quote else out + ([word] if word else [])
+
+
+class SessionFolders:
+    """Where a session's next call starts when it names no ``workdir``: Hermes runs each terminal command, script and
+    relative file path in the session's recorded folder, which every earlier `cd` moves. The plugin can read only
+    the folder the session started in (``ctx.session_cwd()``), so this follows the session's own terminal calls:
+    after `cd <folder>` into a folder that exists the next call starts there, after one that may have failed in
+    either folder; after a change of folder it cannot follow, the start is unknown and relative names count as the
+    profile's. A session first seen after a plugin reload
+    starts from the recorded folder again."""
+
+    LIMIT = 512
+
+    def __init__(self, declared: Optional[Callable[[], str]] = None) -> None:
+        self._declared = declared
+        self._seen: dict = {}
+        self._lock = threading.Lock()
+
+    def where(self, key: str) -> Optional[frozenset]:
+        with self._lock:
+            if key in self._seen:
+                return self._seen[key]
+        try:
+            folder = str(self._declared() or "").strip() if self._declared else ""
+        except Exception:
+            folder = ""
+        return frozenset({os.path.normpath(folder)}) if os.path.isabs(folder) else None
+
+    def forget(self, key: str) -> None:
+        """The start of ``key``'s next call is unknown."""
+        with self._lock:
+            self._seen[key] = None
+
+    def follow(self, key: str, tool_name: str, args: Any, home: Optional[Path]) -> None:
+        """Note a terminal call: Hermes moves the session's folder only for a call without a ``workdir``."""
+        if tool_name != "terminal" or not isinstance(args, dict) or args.get("workdir") or not key:
+            return
+        command = str(args.get("command") or "")
+        readable = _names_readable(command)
+        if readable and not _CD_RE.search(command):
+            return
+        before = self.where(key)
+        after: Optional[frozenset] = None
+        if readable and before is not None and home is not None:
+            moves = {(folder, _start_folder(command, folder, Path(home), user_home, _CD_RE))
+                     for folder in before for user_home in _user_homes(home)}
+            if all(target for _, target in moves):
+                # a `cd` into a folder that exists and may be entered does not fail; after another the shell
+                # may have stayed
+                after = frozenset().union(*({target} if os.path.isdir(target) and os.access(target, os.X_OK)
+                                            else {folder, target} for folder, target in moves))
+        with self._lock:
+            self._seen.pop(key, None)
+            self._seen[key] = after
+            while len(self._seen) > self.LIMIT:
+                self._seen.pop(next(iter(self._seen)))
+
+
+def settings_touch(tool_name: str, args: Any, home: Optional[Path], *,
+                   cwds: Optional[frozenset] = None) -> Optional[str]:
     """What a tool call would change in this profile's guardrails, or None. A heuristic over the call's
     text: it catches the direct routes (editing config.yaml or .env, `hermes config set`, toggling the
-    plugin), not a determined script, which is why Hermes' own approvals stay on for the shell."""
+    plugin), not a determined script, which is why Hermes' own approvals stay on for the shell. ``cwds`` are
+    the folders a call without a ``workdir`` may start in (``SessionFolders``); None when unknown."""
     if tool_name not in GUARDED_TOOLS or not isinstance(args, dict):
         return None
     if tool_name in ("write_file", "patch"):
         raw = str(args.get("path") or "")
         if not raw:
             return None
-        path = Path(raw).expanduser()
-        if _is_plugin_code(path, home):
-            return f"edits Forgebrücke's own code ({raw})"
-        if _is_plugin_data(path, home):
-            return f"edits Forgebrücke's own data ({raw})"
-        names = set(_SETTINGS_FILES)
-        if home is not None and path.is_absolute():
-            if _spellings(path) & set().union(*(_spellings(home / n) for n in names)):
-                return f"edits {path}"
-            return None
-        return f"edits {raw}" if path.name in names else None
+        for user_home in _user_homes(home):
+            path = Path(_tilde(raw, user_home))
+            places = [path] if path.is_absolute() or not cwds else [Path(c) / path for c in sorted(cwds)]
+            for place in places:
+                what = _file_touch(raw, place, home)
+                if what:
+                    return what
+        return None
     text = str(args.get("command") or args.get("code") or "")
     workdir = args.get("workdir") if tool_name == "terminal" else None
-    lowered = text.lower()
-    # One cheap pass first: a call with no hint word and no folder to stand in names nothing guarded.
-    if not workdir and not any(h in lowered for h in _HINTS) and not _MOVE_RE.search(text):
+    shell = tool_name == "terminal"
+    if shell and _only_reads(text):
         return None
-    if tool_name == "terminal" and _only_reads(text):
-        return None
-    kind = _named(text, home, workdir)
+    written = _written_only(text) if shell else None
+    lowered = (text if written is None else written).lower()
+    sessions = sorted(cwds) if cwds and not workdir else [None]
+    found = {_named(text, home, workdir, session, shell) for session in sessions}
+    kind = next((k for k in _KINDS if k in found), None)
     if kind is None and _names_settings_key(lowered, tool_name):
         kind = "settings"
     if kind is None and "hermes" in lowered and _hermes_changes_here(lowered, home):
@@ -763,21 +1225,43 @@ def settings_touch(tool_name: str, args: Any, home: Optional[Path]) -> Optional[
     return _WHAT[kind] if kind else None
 
 
+def _file_touch(raw: str, path: Path, home: Optional[Path]) -> Optional[str]:
+    """What a write_file or patch on ``path`` (``raw`` as the call wrote it) would change, or None."""
+    if _is_plugin_code(path, home):
+        return f"edits Forgebrücke's own code ({raw})"
+    if _is_plugin_data(path, home):
+        return f"edits Forgebrücke's own data ({raw})"
+    names = set(_SETTINGS_FILES)
+    if home is not None and path.is_absolute():
+        if _spellings(path) & set().union(*(_spellings(home / n) for n in names)):
+            return f"edits {path}"
+        return None
+    return f"edits {raw}" if path.name in names else None
+
+
 def make_settings_guard(run_context: Callable[[], RunContext], enabled_here: Callable[[], bool],
-                        home: Callable[[], Optional[Path]]):
+                        home: Callable[[], Optional[Path]], session_cwd: Optional[Callable[[], str]] = None):
     """Hermes skips a hook that raises, so nothing here may raise: a check that fails asks, and a run
-    context that cannot be read counts as nobody there."""
-    def forgebruecke_settings_guard(tool_name: str = "", args: Any = None, session_id: str = "", **_: Any):
+    context that cannot be read counts as nobody there. ``session_cwd`` is ``ctx.session_cwd``."""
+    folders = SessionFolders(session_cwd)
+
+    def forgebruecke_settings_guard(tool_name: str = "", args: Any = None, session_id: str = "", task_id: str = "",
+                                    **_: Any):
         if tool_name not in GUARDED_TOOLS:
             return None
         try:
             here = home()
         except Exception:
             here = None  # any profile's settings count
+        key = str(task_id or session_id or "")
         try:
-            what = settings_touch(tool_name, args, here)
+            what = settings_touch(tool_name, args, here, cwds=folders.where(key) if key else None)
         except Exception:
             what = "could not be checked by Forgebrücke's settings guard"
+        try:
+            folders.follow(key, tool_name, args, here)
+        except Exception:
+            folders.forget(key)
         if not what:
             return None
         try:
@@ -801,3 +1285,20 @@ def make_settings_guard(run_context: Callable[[], RunContext], enabled_here: Cal
                             "asked for it.")}
 
     return forgebruecke_settings_guard
+
+
+def make_review_lockdown(review_worker: Callable[[], bool] = _review_worker):
+    """A review worker answers its verdict and calls no tool. Hermes adds the profile's plugin toolsets to the
+    worker's ``-t no_mcp`` selection, so this hook refuses every call such a session makes. Nothing here may
+    raise: Hermes skips a hook that does."""
+    def forgebruecke_review_lockdown(tool_name: str = "", **_: Any):
+        try:
+            worker = review_worker()
+        except Exception:
+            worker = False
+        if not worker:
+            return None
+        return _block(_refusal("guardrail", f"A Forgebrücke review worker calls no tool, so {tool_name or 'this call'} "
+                                            "was refused. Answer with the verdict JSON only."))
+
+    return forgebruecke_review_lockdown

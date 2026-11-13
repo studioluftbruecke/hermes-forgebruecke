@@ -1,6 +1,6 @@
 """The flows engine: on every tick, move each open pull request one step along its flow.
 
-PRODUCT.md § Rules the engine enforces, as code:
+The rules the engine enforces:
 
 1. One PR, one head commit, ordered gates. A push when no gate is failed, error or blocked resets every
    gate, so the commit that waits for the merge is the one that was reviewed and checked. A push after a
@@ -40,12 +40,15 @@ import hashlib
 import importlib
 import inspect
 import logging
+import re
+import secrets
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 MAX_PARALLEL_REVIEWS = 2
 MAX_OPEN_PRS = 100  # per repo and tick
+MAX_COMMENTS_READ = 300  # of one pull request, when looking for a comment whose post was answered with an error
 FOOTER = "\n\n<sub>Kept up to date by Forgebrücke (Hermes). The merge into the target branch is yours.</sub>"
 ICONS = {"passed": "✅", "failed": "❌", "error": "⚠️", "running": "⏳", "pending": "·", "waiting": "👤",
          "blocked": "⛔", "skipped": "↷"}
@@ -62,8 +65,39 @@ def _mod(name: str):
     return importlib.import_module(f".{name}", pkg)
 
 
+_MARKDOWN = re.compile(r"([\\`\[\]<>|&])")
+_BIDI = re.compile("[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+# "#1", "acme/app#1", "!1", and a commit id where the forge reads one: seven or more hex digits after a space or
+# a bracket.
+_REFERENCE = re.compile(r"(#(?=\w)|!(?=\d))|(?:^|(?<=[\s(\[]))([0-9a-fA-F]{7,})(?![0-9A-Za-z])")
+
+
+def _inert(text: Any) -> str:
+    """Text from outside the engine (a review worker's verdict, another account's check) on one line, with no
+    mention that pings anyone, no address the forge would turn into a link, and no bidi control."""
+    one_line = " ".join(_BIDI.sub("", str(text or "")).split())
+    return one_line.replace("@", "@\u200b").replace("://", ":\u200b//").replace("www.", "www\u200b.")
+
+
+def _unreferenced(text: Any) -> str:
+    """A review worker's text with zero-width spaces inside every issue, pull request and commit reference (a
+    commit id split every six digits), so the forge neither links it nor adds a cross-reference to the issue."""
+    def split(m: "re.Match") -> str:
+        if m.group(1):
+            return m.group(1) + "\u200b"
+        digits = m.group(2)
+        return "\u200b".join(digits[i:i + 6] for i in range(0, len(digits), 6))
+    return _REFERENCE.sub(split, str(text or ""))
+
+
+def _md(text: Any) -> str:
+    """``_inert`` text escaped for Markdown: no HTML, link, image or code span, and no ``|`` that would end a
+    table cell. The escapes render as the characters themselves."""
+    return _MARKDOWN.sub(r"\\\1", _inert(text))
+
+
 def _desc(text: str) -> str:
-    return " ".join(str(text or "").split())[:140]
+    return _inert(text)[:140]
 
 
 def _accepts(call: Callable, keyword: str) -> bool:
@@ -169,6 +203,7 @@ class Engine:
         self.writes: list = []
         self.errors: list = []
         self.models = _mod("models")
+        self._login: Optional[str] = None  # Hermes' account, read once per tick when a comment is looked up
 
     # --- the tick ------------------------------------------------------------------------------
 
@@ -328,6 +363,8 @@ class Engine:
                     old["notified"] = []  # no comment was ever sent, so no failure notify was either
             if first is not None:
                 self._retire(old, reason, from_gate=first)
+                rerun = {gate.get("id") for gate in old["gates"][first:]}  # a run again may fail and notify again
+                old["notified"] = [i for i in old.get("notified") or [] if i not in rerun]
                 old["gates"][first:] = self._fresh_gates(flow, repo, n, old["head_sha"])[first:]
             old.update(made_under)
             return old
@@ -533,6 +570,11 @@ class Engine:
                 self._end(run, "blocked", f"review rounds used up ({rounds} of {gate.max_fix_rounds}). "
                                           "To start over, raise version in the flow file.")
                 return
+            refusal = getattr(self.runner, "refusal", None)
+            why = refusal(gate.by) if refusal is not None and not run.evidence.get("starting") else ""
+            if why:
+                self._end(run, "error", why)
+                return
             if self.store.running_reviews() >= MAX_PARALLEL_REVIEWS:
                 run.detail = f"queued: {MAX_PARALLEL_REVIEWS} reviews are already running"
                 return
@@ -549,11 +591,14 @@ class Engine:
                 return
             verdict = self.store.verdict_path(flow.id, st["repo"], st["pr"], st["head_sha"], gate.key)
             log_path = verdict.with_suffix(".log")
-            # A tick that died between a worker's start and the save below left a worker no state knows. The
-            # runner's record beside the log does, so that worker is taken over and no second one starts.
+            # A tick that died between a worker's start and the save below left a worker no state knows. Its
+            # run is marked "starting" (saved before the start), so the next tick takes that worker over while it
+            # runs, or takes its answer once it ended; no second worker starts. A verdict without the mark is
+            # from an earlier run of this commit and is removed.
             recorded = getattr(self.runner, "recorded_pid", None)
             pid = recorded(log_path) if recorded is not None else None
-            if pid is None:
+            answered = pid is None and run.evidence.get("starting") == str(verdict) and verdict.exists()
+            if pid is None and not answered:
                 pr = self.access.reader().get(f"/repos/{st['repo']}/pulls/{st['pr']}").data or {}
                 verdict.parent.mkdir(parents=True, exist_ok=True)
                 if verdict.exists():
@@ -562,30 +607,39 @@ class Engine:
                 prompt.write_text(runner_mod.build_prompt(
                     flow_id=flow.id, gate_key=gate.key, lens=gate.lens, repo=st["repo"], pr=st["pr"],
                     title=str(pr.get("title") or ""), body=str(pr.get("body") or ""), head_sha=st["head_sha"],
-                    diff=diff, verdict_path=verdict, fix_round=rounds + 1, max_rounds=gate.max_fix_rounds),
+                    diff=diff, fix_round=rounds + 1, max_rounds=gate.max_fix_rounds),
                     encoding="utf-8")
+                run.evidence["starting"] = str(verdict)
+                self._save(st, run)
                 pid = self.runner.start(profile=gate.by, prompt_path=prompt, log_path=log_path)
             run.attempts += 1
+            run.evidence.pop("starting", None)
             run.evidence.update(pid=pid, run_file=str(verdict), profile=gate.by)
             self._start(run, f"review by {gate.by} running (round {rounds + 1} of {gate.max_fix_rounds})")
+            if answered:
+                self._read_verdict(st, run)
             self._save(st, run)
             return
+
         if run.state != "running" or self._read_verdict(st, run):
             return
         if not self._worker("alive", run):
-            self._end(run, "error", f"the review run by {gate.by} ended without writing a verdict")
+            self._end(run, "error", f"the review run by {gate.by} ended without an answer")
         elif self.now() - (run.started_at or self.now()) > gate.timeout_min * 60:
             self._stop_review(run)
             self._end(run, "error", f"the review by {gate.by} timed out after {gate.timeout_min} min")
 
     def _read_verdict(self, st: dict, run) -> bool:
-        """Apply the worker's verdict file to its review run. False while the worker has not written it.
+        """Apply the worker's verdict to its review run. False while the worker has not answered.
         A verdict that asks for a fix is one round of ``max_fix_rounds``; a push alone is none."""
         by = run.evidence.get("profile")
         state, summary, findings, problem = _mod("flows.runner").read_verdict(
             Path(run.evidence.get("run_file") or ""), run.head_sha)
         if not state:
             return False
+        summary, problem = _unreferenced(summary), _unreferenced(problem)
+        findings = [{**f, "file": _unreferenced(f.get("file")), "problem": _unreferenced(f.get("problem"))}
+                    for f in findings]
         run.evidence.update(summary=summary, findings=findings)
         if state == "error":
             self._end(run, "error", f"review by {by}: {problem}")
@@ -742,15 +796,15 @@ class Engine:
         lines = [f"**Forgebrücke · flow `{flow.id}` · head `{st['head_sha'][:12]}`**", "",
                  "| Gate | State | What happened |", "| --- | --- | --- |"]
         for gate, run in zip(flow.gates, runs):
-            lines.append(f"| {gate.label()} | {ICONS.get(run.state, '')} {run.state} | {run.detail} |")
+            lines.append(f"| {gate.label()} | {ICONS.get(run.state, '')} {run.state} | {_md(run.detail)} |")
         review = next((r for g, r in zip(flow.gates, runs) if g.type == "review" and r.evidence.get("findings")), None)
         if review is not None:
             lines += ["", "**Review findings**"] + [
-                f"- `{f.get('file')}`{(':' + str(f['line'])) if f.get('line') else ''}: {f.get('problem')}"
+                f"- {_md(f.get('file'))}{(':' + str(f['line'])) if f.get('line') else ''}: {_md(f.get('problem'))}"
                 for f in review.evidence["findings"]]
         flags = [flag for run in runs for flag in run.evidence.get("flags") or []]
         if flags:
-            lines += ["", "**Posted by an unexpected account**"] + [f"- {flag}" for flag in flags]
+            lines += ["", "**Posted by an unexpected account**"] + [f"- {_md(flag)}" for flag in flags]
         nxt = next(((g, r) for g, r in zip(flow.gates, runs) if r.state not in self.models.DONE_STATES), None)
         if nxt is None:
             lines += ["", "Every gate passed."]
@@ -760,6 +814,22 @@ class Engine:
             lines += ["", f"**What happens next:** fix the cause and push; the {nxt[0].key} gate runs again on the new head."]
         return "\n".join(lines) + FOOTER
 
+    def _own_comment(self, st: dict, is_it: Callable[[str], bool]) -> Optional[int]:
+        """The newest comment Hermes' account posted on the pull request whose body ``is_it`` accepts, or
+        None. A post the forge stored but answered with an error (a proxy timeout) is found here, so the next
+        tick goes on from it instead of posting it again. Read only before a post no saved state records."""
+        if self.settings.dry_run:
+            return None
+        if self._login is None:
+            self._login = str((self.access.writer().get("/user").data or {}).get("login") or "")
+        login = self._login
+        comments = self.access.reader().paginate(f"/repos/{st['repo']}/issues/{st['pr']}/comments",
+                                                 max_items=MAX_COMMENTS_READ).items
+        for c in reversed(comments):
+            if login and (c.get("user") or {}).get("login") == login and is_it(str(c.get("body") or "")):
+                return c.get("id")
+        return None
+
     def _status_comment(self, st: dict, flow, runs: list) -> None:
         body = self.render_comment(st, flow, runs)
         digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
@@ -768,7 +838,12 @@ class Engine:
         w = self._writer(flow)
         cid = st.get("status_comment_id")
         if not (cid and w.edit_comment(st["repo"], cid, body)):
-            st["status_comment_id"] = w.comment(st["repo"], st["pr"], body)
+            first_line = body.split("\n", 1)[0].rsplit(" · head", 1)[0]
+            found = self._own_comment(st, lambda posted: posted.startswith(first_line))
+            if found and found != cid and w.edit_comment(st["repo"], found, body):
+                st["status_comment_id"] = found
+            else:
+                st["status_comment_id"] = w.comment(st["repo"], st["pr"], body)
         st["status_comment_hash"] = digest
         self._save(st)
 
@@ -781,9 +856,16 @@ class Engine:
         for gate, run in zip(flow.gates, runs):
             if run.state in STOPPED_STATES and run.id not in notified:
                 word = {"failed": "failed", "error": "stopped with an error", "blocked": "is blocked"}[run.state]
-                text = (f"@{who} the {gate.key} gate {word} on `{run.head_sha[:12]}`. {run.detail.rstrip('.')}. "
+                if not run.evidence.get("notify_key"):
+                    # Saved before the post: a notify the forge stored but answered with an error is found by this
+                    # key on the next tick. A gate that runs again gets a new run, so its failure gets a new key.
+                    run.evidence["notify_key"] = secrets.token_hex(8)
+                    self._save(st, run)
+                marker = f"<!-- forgebruecke:notify:{run.evidence['notify_key']} -->"
+                text = (f"@{who} the {gate.key} gate {word} on `{run.head_sha[:12]}`. {_md(run.detail).rstrip('.')}. "
                         "Nothing was merged. The status comment above shows every gate.")
-                self._writer(flow).comment(st["repo"], st["pr"], text + FOOTER)
+                if self._own_comment(st, lambda posted: marker in posted) is None:
+                    self._writer(flow).comment(st["repo"], st["pr"], text + FOOTER + "\n" + marker)
                 notified.append(run.id)
                 del notified[:-50]
                 self._save(st)

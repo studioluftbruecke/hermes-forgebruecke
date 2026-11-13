@@ -3,4 +3,4 @@
 the Desktop half can say when it is older than Hermes' half, and the mention channel compares it with the code on
 disk to notice an update that only half arrived.
 """
-VERSION = "0.0.24"
+VERSION = "0.0.25"

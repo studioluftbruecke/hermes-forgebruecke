@@ -1,6 +1,6 @@
-"""Waiting for me (feedback round 2026-11-12, FB-2): the repository filter, "Ask something else", the green Merge.
+"""Waiting for me: the repository filter, "Ask something else", the green Merge.
 
-The functions run in node, cut out of desktop/plugin.js; the render is proven by the harness under experiments/."""
+The functions run in node, cut out of desktop/plugin.js; the render itself is checked outside this suite."""
 import json
 import re
 import shutil

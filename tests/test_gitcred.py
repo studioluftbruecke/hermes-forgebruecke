@@ -72,7 +72,8 @@ def test_without_an_action_it_prints_the_setup_for_this_forge():
     code, out = run_cli(None)
     assert code == 0
     assert "git config --global --replace-all credential.https://forge.example.helper ''" in out
-    assert "--add credential.https://forge.example.helper 'cache --timeout=3600'" in out
+    assert "cache" not in out  # no second copy of Hermes' token in git's credential cache
+    assert out.count("  git config --global") == 2  # the two setup lines
     assert "forgebruecke git-credential get; fi; }; f'" in out and " -p " in out
     assert BOT not in out and OWNER not in out
 

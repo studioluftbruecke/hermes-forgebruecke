@@ -89,6 +89,9 @@ class Channel:
     def reactions(self):
         return [p for m, p, b in self.forge.writes if p.endswith("/reactions")]
 
+    def comments(self):
+        return [p for m, p, b in self.forge.writes if p.endswith("/comments")]
+
 
 def test_one_failing_delivery_keeps_the_others_and_is_tried_again(adapter_mod, tmp_path):
     ch = Channel(adapter_mod, tmp_path)
@@ -205,6 +208,7 @@ def failing_post(ch, which):
 
 def test_an_answer_cut_off_after_its_first_part_is_reported_as_partly_delivered(adapter_mod, tmp_path):
     ch = Channel(adapter_mod, tmp_path)
+    ch.poll()
     failing_post(ch, 2)
     result = asyncio.run(ch.adapter.send(f"{DEMO}#1", long_answer()))
     # Hermes sends a failed answer again as plain text unless the result says a part is already visible
@@ -214,9 +218,10 @@ def test_an_answer_cut_off_after_its_first_part_is_reported_as_partly_delivered(
 
 def test_an_answer_whose_first_part_fails_is_a_plain_failure(adapter_mod, tmp_path):
     ch = Channel(adapter_mod, tmp_path)
+    ch.poll()
     failing_post(ch, 1)
     result = asyncio.run(ch.adapter.send(f"{DEMO}#1", long_answer()))
-    assert not result.success and result.raw_response is None and ch.forge.writes == []
+    assert not result.success and result.raw_response is None and ch.comments() == []
 
 
 def test_only_a_poll_that_found_or_skipped_something_leaves_a_poll_line(adapter_mod, tmp_path):
@@ -260,3 +265,50 @@ def test_a_mention_that_keeps_failing_is_given_up_after_three_tries(adapter_mod,
     assert ch.delivered == ["900"] * 3
     assert ch.answered() == [f"{DEMO}#1/c900"]
     assert [e["tries"] for e in ch.events("deliver_failed")] == [1, 2, 3]
+
+
+# --- send() posts only the answer to a mention the channel itself handed to Hermes -----------------------------
+
+def test_send_refuses_a_thread_no_mention_started(adapter_mod, tmp_path):
+    ch = Channel(adapter_mod, tmp_path)
+    result = asyncio.run(ch.adapter.send(f"{DEMO}#7", "posted by a cron delivery"))
+    assert not result.success and "mention" in result.error and ch.comments() == []
+    assert ch.events("send_refused")[-1]["chat"] == f"{DEMO}#7"
+
+
+def test_send_refuses_a_thread_after_the_answer_window(adapter_mod, tmp_path):
+    ch = Channel(adapter_mod, tmp_path)
+    ch.poll()
+    ch.now += adapter_mod.ANSWER_WINDOW_S + 1
+    result = asyncio.run(ch.adapter.send(f"{DEMO}#1", "an hour later"))
+    assert not result.success and ch.comments() == []
+
+
+def test_send_refuses_a_thread_whose_repo_rule_turned_mentions_off(adapter_mod, tmp_path):
+    ch = Channel(adapter_mod, tmp_path)
+    ch.poll()
+    ch.values["writes"] = [{"repo_glob": DEMO, "mentions": False}]
+    result = asyncio.run(ch.adapter.send(f"{DEMO}#1", "answer"))
+    assert not result.success and ch.comments() == []
+
+
+def test_send_answers_the_thread_it_handed_over_within_the_window(adapter_mod, tmp_path):
+    ch = Channel(adapter_mod, tmp_path)
+    ch.poll()
+    ch.now += adapter_mod.ANSWER_WINDOW_S - 60
+    result = asyncio.run(ch.adapter.send(f"{DEMO}#1", "answer"))
+    assert result.success and len(ch.comments()) == 1
+
+
+def test_the_platform_refuses_every_send_message_and_cron_target():
+    from fb_fakes import sub as load
+    plugin = load("__init__")
+    seen = {}
+
+    class Ctx:
+        def register_platform(self, **kw):
+            seen.update(kw)
+
+    plugin._register_channel(Ctx(), None)
+    verdict = seen["validate_target_ref_fn"](f"{DEMO}#1")
+    assert isinstance(verdict, str) and verdict and verdict is not True

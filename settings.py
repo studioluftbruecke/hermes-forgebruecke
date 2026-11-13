@@ -5,7 +5,7 @@ Shapes:
 - ``Rule(repo_glob, mentions, flows, targets)``: one row of the ``writes`` setting (label "Per-repo
   rules"). It says where flows run, whether Hermes answers mentions there and which branches a pull
   request may target. It grants nothing: what Hermes may read or write in a repo is the Forgejo
-  collaborator right of its account there (since 0.0.14), asked in ``access.py``. ``mentions`` is on
+  collaborator right of its account there, asked in ``access.py``. ``mentions`` is on
   unless a rule switches it off. What cannot be read switches it off too, as it may be the opt-out: a
   value that is neither true nor false, an unknown key in a rule that does not state ``mentions``, and a
   rule without a readable ``repo_glob`` (then for every later rule and every repo no rule names).
@@ -14,11 +14,11 @@ Shapes:
 - ``Settings``: every non-secret setting from ``config_schema``, already validated, plus the
   ``warnings`` produced while validating (an invalid value falls back to its default and says so).
   ``you`` is the user's own Forgejo login: the desk's Waiting for me lists the pull requests that
-  request his review, and ``forgejo_create_pr`` requests his review by default. With
-  ``review_every_pr`` (on by default) the flows tick asks him on every other open pull request too, and
-  the desk lists one that does not ask him yet (``review_requests.py``).
+  request the user's review, and ``forgejo_create_pr`` requests that review by default. With
+  ``review_every_pr`` (on by default) the flows tick asks the user on every other open pull request too, and
+  the desk lists one that does not ask the user yet (``review_requests.py``).
 - ``Credentials(token, owner_token)``: the agent account's token (required) and an optional write token
-  of the user's own account (only the desk's Merge and Comment buttons, on his click). Their ``repr`` never
+  of the user's own account (only the desk's Merge and Comment buttons, on the user's click). Their ``repr`` never
   shows a value, and nothing in this plugin logs them. A token with a space, a line break or a
   non-ASCII character counts as unset, and ``problems()`` says which field to enter again. Which token a
   call uses is decided by its lane (``access.py``), not by the caller.
@@ -37,10 +37,7 @@ from typing import Any, Callable, Optional
 
 TOKEN_ENV = "FORGEBRUECKE_BOT_ACCOUNT_TOKEN"
 OWNER_TOKEN_ENV = "FORGEBRUECKE_PERSONAL_WRITE_TOKEN"
-# Names before 0.0.12. Never read as a token: only so the settings page can say "found under the old name,
-# enter it again". Remove before the first public release (no published build used them).
-RENAMED_FROM = {TOKEN_ENV: "FORGEBRUECKE_TOKEN", OWNER_TOKEN_ENV: "FORGEBRUECKE_OWNER_TOKEN"}
-# Settings and rule keys of earlier versions, read only to say they are ignored now (since 0.0.14).
+# Settings and rule keys of earlier versions, read only to say they are ignored now.
 RETIRED_SETTINGS = ("read_scope", "badge_meaning")
 RETIRED_RULE_KEYS = ("read", "comment", "write")
 RULE_KEYS = ("repo_glob", "mentions", "flows", "targets")

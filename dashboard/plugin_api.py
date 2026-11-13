@@ -11,28 +11,31 @@
                                       one of you, dry_run, review_every_pr, learn_mode, audit_enabled to the
                                       profile's plugin settings; never a token
     POST /reviewer-profile            create `forgebruecke-reviewer` (or the command)
-    POST /reload-tokens               end this profile's plugin host child, so the next request reads the
-                                      profile's .env again (only inside a plugin host child)
+    POST /reload-tokens               read Forgebrücke's two tokens again through Hermes' secret loader and
+                                      use them in this process; ends nothing
     POST /park                        {repo, number, note?, wake_commits, seen{head_sha, comment_at, draft}}:
-                                      set a pull request aside under Waiting for me (his private desk state)
+                                      set a pull request aside under Waiting for me (the user's private desk state)
     POST /unpark                      {repo, number}: bring it back (Unpark, Undo)
-    POST /comment                     {repo, number, body}: post his comment with his write token, as him,
+    POST /comment                     {repo, number, body}: post the user's comment with the user's write token,
                                       read back before it says posted
 
 The handlers are `desk.py`'s `api_*` functions; this file only adapts them to FastAPI. Hermes loads it
 as a standalone module, so the plugin folder is loaded here as a package by path. Settings come from
 the profile config (`plugins.entries.forgebruecke.settings`), secrets from Hermes' secret scope. The
 flow state is the agent half's data folder (`ctx.state.data_dir`, the portable namespace
-`agent-plugin-forgebruecke-<digest>`), resolved per call so it follows the active profile.
+`agent-plugin-forgebruecke-<digest>`), resolved per call so it follows the active profile. The setting route
+writes through Hermes' own `hermes config set` (a subprocess with this profile's HERMES_HOME).
 """
 
 from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
+import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Body, Query
 from fastapi.responses import JSONResponse
@@ -83,16 +86,17 @@ def _home() -> Path:
     return Path(get_hermes_home())
 
 
-def _data_dir(create: bool = False) -> Optional[Path]:
-    """The agent half's data folder: the same name Hermes gives `ctx.state.data_dir`. ``create`` makes it for
-    the park routes: a profile that never ran a flow has none yet."""
-    try:
-        from hermes_cli.plugins_manifest import _portable_data_namespace
+def data_namespace(key: str = PLUGIN) -> str:
+    """The folder name Hermes gives a plugin's `ctx.state.data_dir` (`plugin-data/agent-plugin-<slug>-<digest>`),
+    restated because Hermes has no public call for it; a test holds it equal to Hermes' own."""
+    slug = "".join(ch if ch.isascii() and (ch.isalnum() or ch in "_-") else "-" for ch in key.lower()).strip("-_")
+    return f"agent-plugin-{slug or 'plugin'}-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:8]}"
 
-        name = _portable_data_namespace(PLUGIN)
-    except Exception:  # an older Hermes: the same rule, by hand
-        name = f"agent-plugin-{PLUGIN}-{hashlib.sha256(PLUGIN.encode()).hexdigest()[:8]}"
-    path = _home() / "plugin-data" / name
+
+def _data_dir(create: bool = False) -> Optional[Path]:
+    """The agent half's data folder. ``create`` makes it for the park routes: a profile that never ran a flow
+    has none yet."""
+    path = _home() / "plugin-data" / data_namespace()
     if create:
         path.mkdir(parents=True, exist_ok=True)
     return path if path.is_dir() else None
@@ -125,17 +129,41 @@ def merge(body: dict = Body(...)) -> JSONResponse:
     return _reply(_desk().api_merge(_get_setting, _get_secret, body, data_dir=_data_dir()))
 
 
+_CLI_WORDS = {"true", "false", "yes", "no", "on", "off", "null", "none", "~", ""}
+
+
+def _as_cli_value(value: Any) -> str:
+    """``value`` as `hermes config set` writes it back unchanged. That command reads true/false and numbers as
+    such, so a name it would turn into one cannot be saved from the page."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    text = str(value)
+    try:
+        float(text)
+        number = True
+    except ValueError:
+        number = False
+    if number or text.strip().lower() in _CLI_WORDS:
+        raise PermissionError(f"Hermes would read {text!r} as a value, not a name. Set it in Hermes' settings.")
+    return text
+
+
+def save_setting(key: str, value: Any, *, home: Path, run: Callable = subprocess.run) -> None:
+    """Write one plugin setting into the profile's config.yaml with Hermes' own `hermes config set`."""
+    env = {**os.environ, "HERMES_HOME": str(home)}
+    argv = [sys.executable, "-m", "hermes_cli.main", "config", "set", f"plugins.entries.{PLUGIN}.settings.{key}",
+            _as_cli_value(value)]
+    done = run(argv, env=env, capture_output=True, text=True, timeout=60)
+    if getattr(done, "returncode", 1) != 0:
+        raise RuntimeError("hermes config set failed")
+
+
 @router.post("/setting")
 def setting(body: dict = Body(...)) -> JSONResponse:
-    try:
-        from hermes_cli.plugins_state import save_plugin_setting
-    except ImportError:
-        return JSONResponse({"ok": False, "error": "not_supported",
-                             "message": "This Hermes cannot save a setting from a page. Set it in Hermes' settings."},
-                            status_code=501)
+    home = _home()
 
     def save(key: str, value: Any) -> None:
-        save_plugin_setting(PLUGIN, (key,), value)
+        save_setting(key, value, home=home)
 
     return _reply(_desk().api_set_setting(body, save=save, get_setting=_get_setting, get_secret=_get_secret,
                                           data_dir=_data_dir()))

@@ -6,7 +6,7 @@ Shapes (what the pane renders):
 
     desk     {ok, label, counts{waiting, parked, running, blocked} (waiting: section "now" only), rows[Row],
               repos[RepoCard], engine{...},
-              can_merge, can_comment (his write token can comment: the feature owner_comment), you,
+              can_merge, can_comment (the user's write token can comment: the feature owner_comment), you,
               waiting_note{message, suggestion, settings_href} | null, notes[],
               repos_error (a sentence when the repo list could not be read) | null,
               forge_error? (a sentence: Hermes' token is missing), generated_at,
@@ -33,7 +33,6 @@ Shapes (what the pane renders):
               audit_enabled}, default_review_profile, reviewer{exists, name, command}, settings_href}
     Token    one row of ``capabilities.TOKENS`` (role, env, label, name, required, account, mint[], unlocks,
              never, risk?) plus what the probe found: set, login, scopes{} | null, error | null, is_admin, and
-             renamed_from (the older name still holding a value while the new one is empty) | null
 
 Waiting for me = flow rows whose human gate waits for you (not for a person the flow names), plus open pull requests whose
 ``requested_reviewers`` contain the ``you`` setting, plus (with ``review_every_pr``, the default) open pull
@@ -42,9 +41,9 @@ there, and the row shows even when that write cannot happen. The scan and the ru
 ``review_requests.py``. Without ``you`` the desk says so (``waiting_note``) and lists flow rows only.
 
 Lanes: the desk reads in the agent lane, with the agent token, so it sees exactly what Hermes' Forgejo
-account sees. The merge button is the owner lane: his write token, on his click. A Waiting row offers it
-when the registry says ``owner_merge`` is available and Forgejo says his account may merge into the row's
-base branch (``merge_right``); a flow row also needs its human gate to wait for him. Every other row links
+account sees. The merge button is the owner lane: the user's write token, on the user's click. A Waiting row offers it
+when the registry says ``owner_merge`` is available and Forgejo says the user's account may merge into the row's
+base branch (``merge_right``); a flow row also needs its human gate to wait for the user. Every other row links
 to Forgejo.
 """
 from __future__ import annotations
@@ -62,7 +61,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 TABS = ("waiting", "running", "blocked")
-# A row's main button: the user's own move when the row waits for him, a link otherwise.
+# A row's main button: the user's own move when the row waits for the user, a link otherwise.
 MOVES = ("merge", "merge_in_forgejo", "review_in_forgejo", "open_in_forgejo")
 DESK_TTL_S = 15
 SETTINGS_TTL_S = 60
@@ -77,12 +76,6 @@ SWITCHES = ("dry_run", "review_every_pr", "learn_mode", "audit_enabled")
 SETTABLE = ("you",) + SWITCHES
 REVIEWER = "forgebruecke-reviewer"
 SETTINGS_HREF = "/settings?tab=plugins&agent=forgebruecke"
-REVIEWER_SOUL = """# Forgebrücke reviewer
-
-You review one pull request when Forgebrücke asks you to. Read the prompt and the diff it gives you,
-decide pass or fail, and write the verdict file the prompt names. Nothing else: no Forgejo writes, no
-pushes, no comments, no other files. If you cannot decide, write fail with the reason.
-"""
 
 _SEGMENT = {"passed": "done", "skipped": "done", "running": "running", "pending": "pending",
             "waiting": "waiting", "failed": "failed", "error": "failed", "blocked": "failed"}
@@ -96,8 +89,8 @@ def _mod(name: str):
 
 
 def nav_label(waiting: int) -> str:
-    """The sidebar row's label: the brand, plus the count of pull requests waiting for the user (D1 of the
-    sidebar-rows plan). Desktop 0.0.22 and newer compose the row from `counts.waiting` the same way, so this
+    """The sidebar row's label: the brand, plus the count of pull requests waiting for the user. Desktop
+    halves 0.0.22 and newer compose the row from `counts.waiting` the same way, so this
     string is for older Desktop halves and the desk answer's readers."""
     if waiting <= 0:
         return "Forgebrücke"
@@ -124,7 +117,7 @@ def tab_of(st: dict, *, you: Optional[str] = None) -> Optional[str]:
 
 def _move(mine: bool, flow: Any, can_merge: bool, *, asked: bool = False) -> str:
     """A row's main button (one of ``MOVES``). ``mine``: the row sits under Waiting for me. ``asked``: the
-    row is there because his review was requested; it keeps Review in Forgejo, and Merge (when he may) sits
+    row is there because the user's review was requested; it keeps Review in Forgejo, and Merge (when allowed) sits
     above it in the stack."""
     if not mine:
         return "open_in_forgejo"
@@ -165,7 +158,7 @@ def _last_comment(client, repo: str, number: int, *, now: Callable[[], float] = 
     ``last_comment``: the newest comment a person wrote. Forgebrücke's own comments (status and tool comments,
     marked by their footer) are skipped: the row already shows what they say.
     ``wake_comment`` {author, at, url}: the newest comment not by ``you`` and not a flow status comment; a
-    comment Hermes posted with ``forgejo_comment`` counts (L14, provisional). A parked row wakes on it.
+    comment Hermes posted with ``forgejo_comment`` counts. A parked row wakes on it.
     A failed read gives ``(None, None)``, which wakes nothing."""
     path = f"/repos/{repo}/issues/{number}/comments"
     me = (you or "").lower()
@@ -412,10 +405,10 @@ def suggest_login(client: Any, counts: dict, agent: str) -> str:
 
 
 def merge_row(r: dict, can_merge: bool, may_merge: Optional[Callable[[str, Any], Optional[bool]]]) -> bool:
-    """Whether a row offers Merge: his write token can merge at all (``owner_merge``), the row waits for him,
-    Forgejo would take the merge (not a draft, not ``mergeable: false``), and Forgejo says his account may
+    """Whether a row offers Merge: the user's write token can merge at all (``owner_merge``), the row waits for the user,
+    Forgejo would take the merge (not a draft, not ``mergeable: false``), and Forgejo says the user's account may
     merge into the row's base branch (``may_merge``: repo permission and branch protection). A review
-    request plays no part; a flow row waits for him only while its human gate waits for him."""
+    request plays no part; a flow row waits for the user only while its human gate waits for the user."""
     if not (can_merge and may_merge and r["tab"] == "waiting") or r.get("draft") or r.get("mergeable") is False:
         return False
     return may_merge(r["repo"], r.get("base")) is True
@@ -428,7 +421,7 @@ def build_desk(access: Any, store: Any, *, can_merge: bool = False, now: Callabl
     desk asks the forge itself when ``you`` is empty. ``data_dir`` holds the parked rows (``parking.py``);
     without it nothing is parked. ``prune`` (only the page's ``GET /desk``) drops parked entries of pull
     requests that are no longer open, and only after a complete scan. ``may_merge(repo, base)`` is Forgejo's
-    answer for his write token (``merge_right``); without it no row offers Merge."""
+    answer for the user's write token (``merge_right``); without it no row offers Merge."""
     forge_error = None
     try:
         client = access.reader()
@@ -526,7 +519,8 @@ def build_desk(access: Any, store: Any, *, can_merge: bool = False, now: Callabl
            "can_comment": False, "waiting_note": waiting_note, "notes": notes,
            "engine": {"at": engine.get("at"), "source": engine.get("source"), "age_s": tick_age,
                       "errors": (engine.get("errors") or [])[:3]},
-           "forge_url": access.settings.url, "version": _mod("version").VERSION, "generated_at": int(now())}
+           "forge_url": access.settings.url, "poll_s": access.settings.poll_interval,
+           "version": _mod("version").VERSION, "generated_at": int(now())}
     if forge_error:
         out["forge_error"] = forge_error
     return out
@@ -542,7 +536,7 @@ def late_tick(engine: dict, settings: Any, now: Callable[[], float]) -> Optional
 
 
 UPDATE_PENDING = "channel-update-pending.json"  # written by channel/adapter.py
-STOPPED_FIX = "Restart Hermes' gateway, or check the Forgebrücke tick job."
+STOPPED_FIX = "Restart Hermes' gateway, or schedule `hermes forgebruecke tick` with cron."
 
 
 def background(data_dir: Any, settings: Any, now: Callable[[], float]) -> Optional[dict]:
@@ -562,7 +556,9 @@ def background(data_dir: Any, settings: Any, now: Callable[[], float]) -> Option
     age = late_tick(engine, settings, now)
     if age is None:
         return None
-    return {"text": f"Mentions and review requests stopped {_ago(age)}.", "fix": STOPPED_FIX,
+    failure = engine.get("failure") if isinstance(engine.get("failure"), dict) else {}
+    why = f"The gateway's loop says: {failure['error']}. " if failure.get("error") else ""
+    return {"text": f"Mentions and review requests stopped {_ago(age)}.", "fix": why + STOPPED_FIX,
             "since": int(engine["at"])}
 
 
@@ -611,12 +607,17 @@ def in_plugin_host() -> bool:
     return os.environ.get(HOST_PROCESS_ENV) == "1"
 
 
+_RELOADED: dict = {}  # Forgebrücke's tokens as "Load it now" last read them
+_RELOADED_AT = 0.0  # when that was; 0 until then, and the secrets this process started with count
+
+
 def tokens_unseen(home: Any) -> bool:
-    """True when this plugin host child started before the profile's .env last changed."""
+    """True when the profile's .env changed after this plugin host child started and after the last "Load it
+    now"."""
     if not home or not in_plugin_host():
         return False
     try:
-        return (Path(home) / ".env").stat().st_mtime > _process_started()
+        return (Path(home) / ".env").stat().st_mtime > max(_process_started(), _RELOADED_AT)
     except OSError:
         return False
 
@@ -687,6 +688,7 @@ def clear_desk_cache() -> None:
 
 def api_settings(get_setting, get_secret, *, transport: Any = None, refresh: bool = False,
                  now: Callable[[], float] = time.time, home: Any = None, data_dir: Any = None) -> "tuple[int, dict]":
+    get_secret = _current(get_secret)
     def make() -> dict:
         rep = _plugin_root().doctor_report(get_setting, get_secret, transport=transport)
         profile = _mod("profile")
@@ -697,10 +699,8 @@ def api_settings(get_setting, get_secret, *, transport: Any = None, refresh: boo
         tokens = []
         for field in _mod("capabilities").TOKENS:
             probe = probed.get(field["role"]) or {}
-            old = settings_mod.RENAMED_FROM.get(field["env"])
-            renamed = bool(old) and not presence[field["env"]] and bool((get_secret(old) or "").strip())
             tokens.append({**{k: v for k, v in field.items() if k != "mint"}, "mint": list(field["mint"]),
-                           "set": presence[field["env"]], "renamed_from": old if renamed else None,
+                           "set": presence[field["env"]],
                            "login": probe.get("identity"),
                            "scopes": probe.get("scopes"), "error": probe.get("error"),
                            "is_admin": probe.get("is_admin", False)})
@@ -727,7 +727,8 @@ def api_settings(get_setting, get_secret, *, transport: Any = None, refresh: boo
                 "you": default.you or None, "you_suggestion": login or None, "you_source": source,
                 "switches": {key: bool(getattr(default, key)) for key in SWITCHES},
                 "reviewer": {"name": REVIEWER, "exists": REVIEWER in profiles,
-                             "command": reviewer_command(profile.current_name(home))},
+                             "command": reviewer_command(profile.current_name(home)),
+                             "copies": reviewer_copy_text(profile.current_name(home))},
                 "background": background(data_dir, default, now), "unprotected": unprotected,
                 "version": _mod("version").VERSION,
                 "settings_href": SETTINGS_HREF, "generated_at": int(now())}
@@ -898,8 +899,8 @@ def owner_can_merge(get_setting, get_secret, *, transport: Any = None, now: Call
 
 
 def merge_right(owner: Any, repo: str, base: Any, *, now: Callable[[], float] = time.time) -> Optional[bool]:
-    """Forgejo's ``user_can_merge`` on ``repo``'s branch ``base`` for the account of ``owner`` (his write
-    token's access): his repo permission and the branch's protection rule in one answer. None when Forgejo did
+    """Forgejo's ``user_can_merge`` on ``repo``'s branch ``base`` for the account of ``owner`` (the user's write
+    token's access): the user's repo permission and the branch's protection rule in one answer. None when Forgejo did
     not say. Kept MERGE_RIGHT_TTL_S per token, repo and branch; an answer Forgejo did not give is not kept."""
     if not base:
         return None
@@ -932,10 +933,13 @@ class _NoFlowState:
 
 def api_desk(get_setting, get_secret, *, data_dir: Any, transport: Any = None, refresh: bool = False,
              now: Callable[[], float] = time.time) -> "tuple[int, dict]":
+    get_secret = _current(get_secret)
     def make() -> dict:
         access = _mod("access").load_access(get_setting, get_secret, transport=transport, lane="agent")
         store = _mod("flows.state").FlowStore(data_dir) if data_dir else _NoFlowState()
-        mine = _write_token_facts(get_setting, get_secret, transport=transport, now=now, refresh=refresh)
+        # Refresh reads the pull requests again; the token's rights stay (the doctor learns them with requests
+        # that are not reads). A changed token is a new cache key, and the settings page's Refresh learns anew.
+        mine = _write_token_facts(get_setting, get_secret, transport=transport, now=now)
         hint = None
         if not access.settings.you and mine["login"]:
             hint = {"login": mine["login"], "source": mine["source"]}
@@ -958,7 +962,7 @@ def repo_pulls(access: Any, store: Any, repo: str, *, can_merge: bool = False, n
     """One repo's open pull requests for the Repos tab, read when the user expands the repo: the newest
     REPO_PULLS_MAX, each with its checks and whether Merge shows, plus the default branch's latest commit and its
     checks. Merge follows the desk's rule (``merge_row``) for any open pull request, not only Waiting rows; a
-    pull request with a running flow offers it only while the flow's human gate waits for him, as ``/merge``
+    pull request with a running flow offers it only while the flow's human gate waits for the user, as ``/merge``
     requires."""
     client = access.reader()
     info = client.get(f"/repos/{repo}").data or {}
@@ -1001,6 +1005,7 @@ def api_repo_pulls(get_setting, get_secret, repo: Any, *, data_dir: Any, transpo
                    refresh: bool = False, now: Callable[[], float] = time.time) -> "tuple[int, dict]":
     """``GET /repo-pulls?repo=owner/name``: ``repo_pulls`` in the agent lane, kept DESK_TTL_S under a desk key, so
     a merge or a park drops it with the desk."""
+    get_secret = _current(get_secret)
     acc = _mod("access")
     try:
         name = acc.parse_repo(repo)
@@ -1027,10 +1032,11 @@ def api_repo_pulls(get_setting, get_secret, repo: Any, *, data_dir: Any, transpo
 
 def api_merge(get_setting, get_secret, body: Any, *, data_dir: Any, transport: Any = None,
               now: Callable[[], float] = time.time) -> "tuple[int, dict]":
-    """The desk's merge button: the user's click, his write token (owner lane), pinned to the head SHA the
-    desk showed. A pull request with a flow merges only while the flow's human gate waits for him; one
-    without a flow whenever it is open. Forgejo decides the rest with his account: repo permission, branch
+    """The desk's merge button: the user's click, the user's write token (owner lane), pinned to the head SHA the
+    desk showed. A pull request with a flow merges only while the flow's human gate waits for the user; one
+    without a flow whenever it is open. Forgejo decides the rest with the user's account: repo permission, branch
     protection and required checks."""
+    get_secret = _current(get_secret)
     body = body if isinstance(body, dict) else {}
     acc = _mod("access")
     try:
@@ -1081,9 +1087,10 @@ MAX_COMMENT_BODY = 10_000
 
 def api_comment(get_setting, get_secret, body: Any, *, data_dir: Any, transport: Any = None,
                 now: Callable[[], float] = time.time) -> "tuple[int, dict]":
-    """The desk's Comment button: his words, posted with his write token (owner lane), on his click, as him.
+    """The desk's Comment button: the user's words, posted with the user's write token (owner lane), on their click, as them.
     Hermes' approval setting and the preview switch do not apply (like Merge). No footer. The answer says
     "posted" only after Forgejo reads the comment back with the same body."""
+    get_secret = _current(get_secret)
     body = body if isinstance(body, dict) else {}
     acc = _mod("access")
     try:
@@ -1120,21 +1127,51 @@ def api_comment(get_setting, get_secret, body: Any, *, data_dir: Any, transport:
                              "Forgejo took the comment but reads back a different text. Open it in Forgejo."), **note}
 
 
-def api_reload_tokens(*, data_dir: Any = None, exit_later: Optional[Callable[[], None]] = None,
+def _profile_secrets(home: Any) -> dict:
+    """The profile's secrets as Hermes reads them now (its ``.env`` and secret sources), through Hermes' loader."""
+    from agent.secret_scope import build_profile_secret_scope
+
+    if home is None:
+        from hermes_constants import get_hermes_home
+        home = get_hermes_home()
+    return dict(build_profile_secret_scope(Path(home)))
+
+
+def _own_secret_names() -> tuple:
+    return tuple(t["env"] for t in _mod("capabilities").TOKENS)
+
+
+def _current(get_secret: Callable) -> Callable:
+    """``get_secret`` with Forgebrücke's own token names answered from the last "Load it now", once there was
+    one. Every other name goes to ``get_secret``."""
+    if not _RELOADED_AT:
+        return get_secret
+    own = _own_secret_names()
+
+    def read(name: str, default: Any = None) -> Any:
+        if name in own:
+            return _RELOADED.get(name, default)
+        return get_secret(name) if default is None else get_secret(name, default)
+    return read
+
+
+def api_reload_tokens(*, home: Any = None, data_dir: Any = None, load: Optional[Callable[[Any], dict]] = None,
                       now: Callable[[], float] = time.time) -> "tuple[int, dict]":
-    """The settings page's "Load it now": ends this profile's plugin host child after the answer is sent. Hermes
-    starts a new one on the next request, which reads the profile's .env again. Refused outside a plugin host
-    child: there the routes run inside Hermes' dashboard itself, which must not end."""
-    if not in_plugin_host():
-        return 409, {"ok": False, "error": "not_here",
-                     "message": "This page runs inside Hermes' dashboard. Restart the dashboard to load a new token."}
-    note = _logged(data_dir, {"at": int(now()), "action": "reload_tokens", "pid": os.getpid()})
-    if exit_later is None:
-        timer = threading.Timer(0.5, os._exit, (0,))
-        timer.daemon = True
-        exit_later = timer.start
-    exit_later()
-    return 200, {"ok": True, "message": "Hermes reloads this profile's plugins now.", **note}
+    """The settings page's "Load it now": read Forgebrücke's tokens again through Hermes' secret loader and use
+    them in this process from now on. A plugin host child holds the secrets it read at its start, and it also
+    serves every other plugin of the profile, so it is never ended for this."""
+    global _RELOADED, _RELOADED_AT
+    try:
+        fresh = (load or _profile_secrets)(home)
+    except Exception as exc:
+        return 500, {"ok": False, "error": "not_read",
+                     "message": f"Hermes could not read the profile's secrets ({type(exc).__name__}). Nothing changed."}
+    with _lock:
+        _RELOADED = {name: fresh[name] for name in _own_secret_names() if fresh.get(name)}
+        _RELOADED_AT = now()
+    clear_cache()
+    note = _logged(data_dir, {"at": int(now()), "action": "reload_tokens", "tokens": sorted(_RELOADED)})
+    return 200, {"ok": True, "message": "Forgebrücke now uses the tokens saved in this profile.", **note}
 
 
 def _bad(message: str) -> "tuple[int, dict]":
@@ -1155,8 +1192,8 @@ def _pr_of(body: Any) -> "tuple[str, int]":
 
 
 def api_park(body: Any, *, data_dir: Any, now: Callable[[], float] = time.time) -> "tuple[int, dict]":
-    """The desk's Park button: his click sets one pull request aside under Waiting for me, with an optional
-    note only he sees. Nothing goes to Forgejo. ``seen`` is the row as the desk showed it; the desk compares
+    """The desk's Park button: the user's click sets one pull request aside under Waiting for me, with an optional
+    note only the user sees. Nothing goes to Forgejo. ``seen`` is the row as the desk showed it; the desk compares
     later reads against it (``parking.wake``). The answer carries no sidebar label: the next desk read sets it."""
     body = body if isinstance(body, dict) else {}
     try:
@@ -1197,6 +1234,7 @@ def api_set_setting(body: Any, *, save: Callable[[str, Any], None], get_setting,
     """The settings page's switches and its "Use this login" button: saves one of ``SETTABLE`` on the user's
     click. ``save(key, value)`` writes the profile's plugin setting. ``you`` must be a user Forgejo knows, not
     an organisation; an empty string clears it. Tokens and every other setting stay in Hermes' own form."""
+    get_secret = _current(get_secret)
     body = body if isinstance(body, dict) else {}
     key, value = body.get("key"), body.get("value")
     if key not in SETTABLE:
@@ -1264,30 +1302,42 @@ def _log(data_dir: Any, record: dict) -> None:
 _NOT_SET = "Config key not set"
 
 
-def _token_unsets() -> "list[list[str]]":
-    """The `hermes` arguments that remove Forgebrücke's two tokens from the reviewer profile. Hermes' own
-    credential handling edits the profile's .env; the plugin never opens that file."""
+def _cleanups() -> "list[list[str]]":
+    """The `hermes` arguments that make the copy fit for reviews: erase its memories (MEMORY.md, USER.md) and
+    remove Forgebrücke's two tokens. Hermes' own commands edit the profile; the plugin never opens its files."""
     s = _mod("settings")
-    return [["-p", REVIEWER, "config", "unset", key] for key in (s.TOKEN_ENV, s.OWNER_TOKEN_ENV)]
+    return [["-p", REVIEWER, "memory", "reset", "--yes", "--target", "all"],
+            *(["-p", REVIEWER, "config", "unset", key] for key in (s.TOKEN_ENV, s.OWNER_TOKEN_ENV))]
 
 
 def reviewer_command(source: str) -> str:
     """The commands the route runs, one per line, for a user who runs them himself."""
     src = source or "<your profile>"
     return "\n".join([f"hermes profile create {REVIEWER} --clone-from {src} --no-alias",
-                      *(" ".join(["hermes", *args]) for args in _token_unsets())])
+                      *(" ".join(["hermes", *args]) for args in _cleanups())])
+
+
+def reviewer_copy_text(source: str) -> str:
+    """What the copy takes, said before it is made (the page's confirm and the route's refusal without it)."""
+    return (f"Hermes copies {source or 'your profile'} into {REVIEWER}: config.yaml, SOUL.md and the .env with every "
+            "key in it, your provider and plugin keys included. Forgebrücke then erases the copy's memories "
+            "(MEMORY.md, USER.md) and removes its own two tokens. Review workers run without tools or memory in "
+            "any profile; a separate one keeps their sessions and model apart.")
 
 
 def api_create_reviewer(body: Any, *, source: str, home: Any = None, run: Callable = subprocess.run,
                         hermes: Optional[str] = None) -> "tuple[int, dict]":
-    """On the user's click in the desk's settings: clone his current profile as a reviewer profile, remove
-    Forgebrücke's tokens from it with `hermes config unset` (a reviewer writes its verdict file only), and give
-    it a reviewer SOUL.md. When the route cannot run Hermes, answer with the exact commands."""
+    """On the user's confirmed click in the desk's settings: copy the user's current profile as a reviewer profile, then
+    erase the copy's memories and remove Forgebrücke's tokens from it, each through a `hermes` command. Without
+    ``confirm: true`` it only says what the copy would take. When the route cannot run Hermes, it answers with
+    the exact commands."""
     profile = _mod("profile")
     existing = profile.list_profiles(home) or []
     command = reviewer_command(source)
     if REVIEWER in existing:
         return 200, {"ok": True, "created": False, "name": REVIEWER, "message": f"{REVIEWER} already exists."}
+    if not (isinstance(body, dict) and body.get("confirm") is True):
+        return 409, {"ok": False, "error": "confirm_needed", "message": reviewer_copy_text(source)}
     exe = hermes if hermes is not None else shutil.which("hermes")
     if not exe or not source:
         return 200, {"ok": False, "error": "run_it_yourself", "command": command,
@@ -1298,7 +1348,7 @@ def api_create_reviewer(body: Any, *, source: str, home: Any = None, run: Callab
         return 200, {"ok": False, "error": "create_failed", "command": command, "message": message}
     try:
         done = run([exe, "profile", "create", REVIEWER, "--clone-from", source, "--no-alias",
-                    "--description", "Forgebrücke reviewer: writes verdict files only"],
+                    "--description", "Forgebrücke reviewer: answers pull request review verdicts"],
                    capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
         return failed("Hermes did not finish within 120 seconds. Run the commands in a terminal on the Hermes host.")
@@ -1308,7 +1358,7 @@ def api_create_reviewer(body: Any, *, source: str, home: Any = None, run: Callab
     if getattr(done, "returncode", 1) != 0:
         return failed(_cap(getattr(done, "stderr", "") or getattr(done, "stdout", ""), 400))
     left = []
-    for args in _token_unsets():
+    for args in _cleanups():
         try:
             out = run([exe, *args], capture_output=True, text=True, timeout=60)
             removed = getattr(out, "returncode", 1) == 0 or _NOT_SET in str(getattr(out, "stderr", "") or "")
@@ -1317,16 +1367,8 @@ def api_create_reviewer(body: Any, *, source: str, home: Any = None, run: Callab
         if not removed:
             left.append(" ".join(["hermes", *args]))
     if left:
-        return failed(f"{REVIEWER} exists now, but Hermes did not remove Forgebrücke's tokens from it. Run these "
-                      "commands in a terminal on the Hermes host before a flow uses it.", "\n".join(left))
-    root = profile.profiles_root(home)
-    target = Path(root) / REVIEWER if root else None
-    try:
-        if target is not None and target.is_dir():
-            (target / "SOUL.md").write_text(REVIEWER_SOUL, encoding="utf-8")
-    except OSError as exc:
-        return failed(f"{REVIEWER} exists now, but its SOUL.md could not be written ({type(exc).__name__}). "
-                      "Check it before a flow uses it.", "")
+        return failed(f"{REVIEWER} exists now, but Hermes did not finish cleaning it. Run these commands in a "
+                      "terminal on the Hermes host before a flow uses it.", "\n".join(left))
     clear_cache()
     return 200, {"ok": True, "created": True, "name": REVIEWER,
                  "message": f"Created {REVIEWER}. Next, pick it as the profile that runs agent reviews in Hermes' "

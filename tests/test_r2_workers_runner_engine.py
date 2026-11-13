@@ -6,6 +6,7 @@ import pytest
 
 from fb_fakes import sub
 from fb_fakes_engine import Kit, engine_env  # noqa: F401
+from fb_fakes_rr_engine import review_home
 
 runner_mod = sub("flows.runner")
 
@@ -19,7 +20,7 @@ def worker_kit(tmp_path, monkeypatch):
     stand_in.write_text("#!/bin/sh\nexec sleep 60\n")
     stand_in.chmod(0o755)
     k = Kit(tmp_path / "state")
-    k.runner = runner_mod.ReviewRunner(hermes_bin=str(stand_in))
+    k.runner = runner_mod.ReviewRunner(hermes_bin=str(stand_in), home=review_home(tmp_path / "root"))
     started = []
 
     def forget_the_worker():

@@ -1,4 +1,4 @@
-"""The plugin's sidebar row comes from the shared module, under its brand, at its place (D3).
+"""The plugin's sidebar row comes from the shared module, under its brand, at its place.
 
 The module is `templates/plugin-skeleton/desktop/sidebar-row.js`. A plugin with an esbuild build
 carries it as `desktop/src/sidebar-row.js`; a single-file plugin pastes the code between the markers
@@ -35,7 +35,7 @@ BEGIN = "// sidebar-row v1 begin"
 END = "// sidebar-row v1 end"
 BLOCK_SHA256 = "f24b11df18931e3044f90aa25fe46f166eba1d76e7e066af9d311a91179fb6d1"
 
-# D3 (Konstantin, 2026-11-11): every plugin row below Kanban (50), one block from 51.
+# Every plugin row sits below Kanban (50), one block from 51.
 POSITIONS = {
     "eselsbruecke": 51,
     "shaderbruecke": 52,
@@ -114,7 +114,7 @@ def test_one_call_with_the_brand_and_the_position():
     assert brand.group(1) == label, f"brand {brand.group(1)!r} is not the dashboard label {label!r}"
     name = plugin_name()
     assert int(position.group(1)) == POSITIONS.get(name), (
-        f"{name} sits at {POSITIONS.get(name)} (D3), the call says {position.group(1)}")
+        f"{name} sits at {POSITIONS.get(name)}, the call says {position.group(1)}")
 
 
 @pytest.mark.skipif(TEMPLATE, reason="the template has no plugin of its own")

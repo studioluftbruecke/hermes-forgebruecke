@@ -1,4 +1,4 @@
-"""The desk with parked rows (PLAN-v0.0.21-park.md PK2, PK3): sections, counts and the sidebar label, Back rows
+"""The desk with parked rows: sections, counts and the sidebar label, Back rows
 first, the prune and when it must not run, the desk as text, and the park routes."""
 import importlib.util
 import json
@@ -235,7 +235,7 @@ def test_the_repo_filter_recounts_by_tab_and_section():
     assert out["counts"] == {"waiting": 1, "parked": 1, "running": 0, "blocked": 1} and out["total"] == 3
 
 
-# The park routes (PK3).
+# The park routes.
 
 SEEN = {"head_sha": HEAD_SHA, "comment_at": None, "draft": False}
 

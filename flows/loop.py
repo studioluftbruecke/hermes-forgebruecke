@@ -59,7 +59,7 @@ def channel_tick(settings, token: str, data_dir: Any, source: str = "channel") -
 
 async def gateway_loop(load_access: Callable[[], Any], get_interval: Callable[[], int], data_dir: Any,
                        enabled_here: Callable[[], bool]) -> None:
-    """The spawn_task loop. Skips quietly when this context has no token (it says why in engine.json)."""
+    """The spawn_task loop. Skips when this context has no token, and says why under ``failure`` in engine.json."""
     store = _mod("flows.state").FlowStore(data_dir)
     while True:
         interval = 120
@@ -69,8 +69,11 @@ async def gateway_loop(load_access: Callable[[], Any], get_interval: Callable[[]
                 try:
                     access = load_access()
                 except Exception as e:
-                    store.write_engine({"at": int(time.time()), "source": "gateway-loop", "ok": False,
-                                        "errors": [f"no Forgejo access in this context: {getattr(e, 'message', e)}"]})
+                    # Kept beside the last tick's stamp, never as one: a loop that cannot act must not look like
+                    # a tick to due() or to the settings page.
+                    store.write_engine({**(store.engine() or {}), "failure": {
+                        "at": int(time.time()), "source": "gateway-loop",
+                        "error": f"no Forgejo access in this context: {getattr(e, 'message', e)}"}})
                     access = None
                 if access is not None and has_work(access.settings):
                     await asyncio.to_thread(run_tick, access, data_dir, "gateway-loop")

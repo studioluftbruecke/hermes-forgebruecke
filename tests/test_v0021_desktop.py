@@ -1,4 +1,4 @@
-"""0.0.21 part 1, M2 (PLAN-v0.0.20.md): the Desktop half. Full width, `#n` titles, the name and the mark, his
+"""The Desktop half. Full width, `#n` titles, the name and the mark, the
 rule copy always visible, the version note, why a row has no Merge, and the settings page lines for a stopped
 background, an unprotected main and a token not picked up yet."""
 import json
@@ -49,7 +49,7 @@ def test_the_mark_is_h1_1_with_its_wings_in_one_colour():
     mark = part("function Mark(", "function VersionNote(")
     assert "translate(39.5 13.5) scale(0.68 0.68) rotate(-26)" in mark
     assert "translate(24.5 13.5) scale(-0.68 0.68) rotate(-26)" in mark
-    assert "currentColor" in mark and "#4100F5" not in SOURCE  # one colour (D2)
+    assert "currentColor" in mark and "#4100F5" not in SOURCE  # one colour
     asset = (ROOT.parents[1] / "experiments" / "forgebruecke" / "brand" / "assets" / "forgebruecke-mark-mono.svg")
     if asset.exists():
         for d in re.findall(r'\sd="([^"]+)"', asset.read_text(encoding="utf-8")):

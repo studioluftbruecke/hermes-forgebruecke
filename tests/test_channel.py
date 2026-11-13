@@ -220,7 +220,7 @@ def test_mention_authors_and_repo_rules_filter():
 
 
 def test_mentions_are_on_without_a_rule_and_only_writers_start_a_turn():
-    """D31: no rule needed; a commenter with read access (or none) starts nothing, the owner and write
+    """No rule needed: a commenter with read access (or none) starts nothing, the owner and write
     collaborators do, and the agent account's own comments never do."""
     cs = [comment(950, "stranger", "@forgebruecke-bot do it", "2026-11-08T13:00:10Z"),
           comment(951, "nobody", "@forgebruecke-bot do it", "2026-11-08T13:00:11Z"),

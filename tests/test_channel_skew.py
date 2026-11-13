@@ -1,4 +1,4 @@
-"""Version skew in a long-lived mention channel (0.0.21 plan V12). On a server the gateway kept a 0.0.17 adapter
+"""Version skew in a long-lived mention channel. On a server the gateway kept a 0.0.17 adapter
 running across the update to 0.0.19: it held a ledger object built from the old ``Ledger`` class, while
 ``_mod`` handed it the new poller, whose ``find_mentions`` reads ``ledger.overlap_due``. Every poll then failed
 with ``'Ledger' object has no attribute 'overlap_due'``, every 30 s, for hours. These tests rebuild that state.

@@ -44,13 +44,23 @@ class Plan:
 
 
 def profile_warnings(flow) -> list:
-    """A review gate names a Hermes profile; say so when that profile does not exist on this host."""
+    """A review gate names a Hermes profile; say so when that profile does not exist on this host, or when it
+    does not enable Forgebrücke (the gate then ends in an error instead of starting a worker)."""
     known = _mod("profile").list_profiles()
     if not known or flow is None:
         return []
-    return [f"the {g.key} gate names the profile {g.by}, which does not exist here (profiles: {', '.join(known)}). "
-            'Assign one you have, or click "Create a reviewer profile" on the Forgebrücke page.'
-            for g in flow.gates if g.type == "review" and g.by not in known]
+    refusal = _mod("flows.runner").profile_refusal
+    out = []
+    for g in flow.gates:
+        if g.type != "review":
+            continue
+        if g.by not in known:
+            out.append(f"the {g.key} gate names the profile {g.by}, which does not exist here (profiles: "
+                       f"{', '.join(known)}). Assign one you have, or click \"Create a reviewer profile\" on the "
+                       "Forgebrücke page.")
+        elif why := refusal(g.by):
+            out.append(f"the {g.key} gate: {why}")
+    return out
 
 
 def parse_file(text: str, source: str, *, default_review_profile: str, visible: Optional[list] = None,

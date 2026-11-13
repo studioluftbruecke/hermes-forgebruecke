@@ -1,6 +1,6 @@
 """Access: settings, credentials and token routing by lane for one call, plus the permission checks.
 
-Forgejo is the only permission layer (since 0.0.14): what Hermes may read or write in a repo is the
+Forgejo is the only permission layer: what Hermes may read or write in a repo is the
 collaborator right of its own Forgejo account there (``permissions`` on ``GET /repos/{owner}/{repo}``:
 pull = read, push = write, admin = admin). The plugin asks, caches the answer for ``RIGHTS_TTL_S`` per
 process (a tick or a desk build asks once per repo, not once per call), and a refusal names the right
@@ -163,7 +163,7 @@ def owner_counts(repos: list) -> dict:
 
 def suggest_you(counts: dict, agent: str, *, skip: Any = ()) -> str:
     """The most common owner among the agent account's repos (``{owner: n}``), not the agent itself: most
-    likely the user who shared them. ``skip`` names logins that cannot be him (organisations). "" when
+    likely the user who shared them. ``skip`` names logins that cannot be the user (organisations). "" when
     there is none."""
     not_him = {str(s).lower() for s in (agent or "", *skip)}
     mine = {o: n for o, n in (counts or {}).items() if o and o.lower() not in not_him}
@@ -258,7 +258,7 @@ class Access:
         return self._client(self.creds.token)
 
     def owner_writer(self):
-        """The write token of the user's account: only in the owner lane (his click in the desk), never for
+        """The write token of the user's account: only in the owner lane (the user's click in the desk), never for
         agent tool writes, mention turns or unattended runs."""
         if self.lane != "owner":
             raise Refusal("wrong_lane", "Your write token is used only on your click in the Forgejo desk; "

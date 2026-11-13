@@ -23,10 +23,10 @@ def sentences():
             yield from (s for s in re.split(r"(?<=[.!?])\s+", text) if s)
 
 
-def test_the_readme_stays_under_1475_words():
-    # 1300 until the two-place section ("Hermes on a server", about 120 words) joined the README; 1450 until the
-    # sidebar line of 0.0.22 (23 words, worded by the sidebar-rows plan for every plugin).
-    assert len(README.split()) < 1475, len(README.split())
+def test_the_readme_stays_under_1800_words():
+    # Grown with the disclosures: the two-place section, the sidebar line, the review worker's limits, the
+    # background loops, the Desktop polling, the channel's send rule and what the reviewer profile copies.
+    assert len(README.split()) < 1800, len(README.split())
 
 
 def test_install_and_troubleshooting_are_there_and_at_most_six_lines_each():
@@ -57,3 +57,22 @@ def test_one_word_per_thing():
                  "the agent's account", "Forgejo login", "the plugin's page", "settings form", "commit status"):
         assert word not in text, word
     assert text.count("your forge") == 0 and text.count("A bridge to your Forgejo.") == 1  # the product line (0.0.21)
+
+
+def test_the_disclosures_name_what_runs_unasked_and_what_it_can_reach():
+    told = " ".join(" ".join(section("Disclosures")).split())
+    for fact in ("-t no_mcp --ignore-rules -Q",  # the review worker's real toolset and context
+                 "no memory", "tool-search bridge", "refuses every call",
+                 "must have Forgebrücke enabled",  # where the worker's lockdown holds
+                 "forgebruecke tick", "cron", "loop in the Hermes gateway",  # the background ticks
+                 "A hidden", "sidebar count",  # Desktop polling
+                 "copies `config.yaml`, `SOUL.md` and the `.env`", "memory reset",  # the reviewer copy
+                 "restarts nothing"):
+        assert fact in told, fact
+    assert "writes a verdict file" not in told
+
+
+def test_the_readme_names_the_version_the_plugin_is():
+    version = re.search(r'^version: "([^"]+)"', (pathlib.Path(__file__).resolve().parents[1] / "plugin.yaml")
+                        .read_text(encoding="utf-8"), re.M).group(1)
+    assert re.search(r"^Version (\S+)\. ", README, re.M).group(1) == version

@@ -2,12 +2,13 @@
 
 ``register`` wires the eight tools, the ``hermes forgebruecke`` command, the bundled skill, the
 ``@forgejo:`` reference, the write approval gate, the mention channel (a gateway platform named
-``forgebruecke``, which needs Hermes' default in-process plugin mode), the receipts hook and the flows
-loop. Every tool handler ends in ``_answer``, which gives refusals and failures one shape.
+``forgebruecke``, which needs Hermes' default in-process plugin mode and is left out in the plugin host),
+the receipts hook and the flows loop. Every tool handler ends in ``_answer``, which gives refusals and failures one shape.
 
-Secrets are read at call time with ``agent.secret_scope.get_secret`` (catalog rule 11): the token of
-Hermes' own Forgejo account ``FORGEBRUECKE_BOT_ACCOUNT_TOKEN`` and the optional write token of the user's
-account ``FORGEBRUECKE_PERSONAL_WRITE_TOKEN`` (only the desk's Merge and Comment buttons). What Hermes may read or write
+Secrets are read at call time with ``agent.secret_scope.get_secret``: the token of Hermes' own Forgejo
+account ``FORGEBRUECKE_BOT_ACCOUNT_TOKEN`` and the optional write token of the user's account
+``FORGEBRUECKE_PERSONAL_WRITE_TOKEN`` (only the desk's Merge and Comment buttons and the settings page's check
+of that token, each on the user's click). What Hermes may read or write
 in a repo is that account's Forgejo collaborator right there.
 Siblings are imported lazily so the package loads under any folder name in tests. Tool names stay
 descriptive (``forgejo_doctor``), not branded.
@@ -34,7 +35,7 @@ FORGEJO_DOCTOR = {
     "name": "forgejo_doctor",
     "description": (
         "Check the setup against the live Forgejo: its version, each token's account, which features work "
-        "and why the others do not. Read-only. Call it when a Forgejo call fails or the user asks what works."
+        "and why the others do not. Changes nothing. Call it when a call fails or the user asks what works."
     ),
     "parameters": {"type": "object", "properties": {
         "detail": {"type": "boolean", "description": "true: the full report instead of the short one"},
@@ -53,7 +54,9 @@ def _default_secret(name: str) -> Optional[str]:
 
 
 def doctor_report(get_setting: SettingGetter, get_secret: SecretGetter, *, transport: Any = None,
-                  state: Any = None) -> dict:
+                  state: Any = None, owner_probe: bool = True) -> dict:
+    """``owner_probe`` False leaves the user's personal write token unsent (the agent's tool and the CLI);
+    only the settings page, on the user's click, checks it."""
     settings_mod, client_mod, doctor_mod = _mod("settings"), _mod("client"), _mod("tools.doctor")
     settings = settings_mod.load_settings(get_setting)
     creds = settings_mod.load_credentials(get_secret)
@@ -61,7 +64,8 @@ def doctor_report(get_setting: SettingGetter, get_secret: SecretGetter, *, trans
     def factory(url: str, token: Optional[str]):
         return client_mod.ForgejoClient(url, token, transport=transport)
 
-    report = doctor_mod.run_doctor(settings, creds, client_factory=factory, channel=_channel_state())
+    report = doctor_mod.run_doctor(settings, creds, client_factory=factory, channel=_channel_state(),
+                                   owner_probe=owner_probe)
     if state is not None and report["instance"].get("version"):
         try:
             _mod("state").StateStore(state).save_capabilities(settings.url, {
@@ -116,7 +120,7 @@ def make_doctor_handler(get_setting: SettingGetter, get_secret: SecretGetter = _
         if lane_fn is not None and lane_fn()[0] != "agent":
             raise _mod("access").Refusal("lane_scope", "The doctor names every repo Hermes' account sees, so it "
                                                        "runs only in the user's own chat.")
-        report = doctor_report(get_setting, get_secret, transport=transport, state=state)
+        report = doctor_report(get_setting, get_secret, transport=transport, state=state, owner_probe=False)
         out = report if detail else _mod("tools.doctor").compact(report)
         if report["ok"]:
             return out
@@ -189,7 +193,7 @@ def make_cli_handler(get_setting: SettingGetter, get_secret: SecretGetter = _def
             print("usage: hermes forgebruecke doctor [--json] | desk [--json] | tick [--repo owner/repo --number N] "
                   "[--json] | git-credential [get|store|erase]")
             return 2
-        report = doctor_report(get_setting, get_secret, state=state)
+        report = doctor_report(get_setting, get_secret, state=state, transport=transport, owner_probe=False)
         if getattr(args, "json", False):
             print(json.dumps(report, ensure_ascii=False, indent=2))
         else:
@@ -538,6 +542,14 @@ def make_write_handler(tool: str, get_setting: SettingGetter, run_context, get_s
     return handler
 
 
+def _session_cwd_of(ctx) -> Callable[[], str]:
+    """``ctx.session_cwd`` (Hermes 0.23.1), or an empty answer on a Hermes without it."""
+    def cwd() -> str:
+        reader = getattr(ctx, "session_cwd", None)
+        return str(reader() or "") if callable(reader) else ""
+    return cwd
+
+
 def _register_writes(ctx, get_setting: SettingGetter, flows_spec: Any = None, repos_spec: Any = None) -> None:
     approval = _mod("approval")
 
@@ -551,7 +563,8 @@ def _register_writes(ctx, get_setting: SettingGetter, flows_spec: Any = None, re
     ctx.register_hook("post_approval_response", approval.make_observer())
     profile = _mod("profile")
     ctx.register_hook("pre_tool_call", approval.make_settings_guard(run_context, profile.enabled_here,
-                                                                    profile.current_home))
+                                                                    profile.current_home, _session_cwd_of(ctx)))
+    ctx.register_hook("pre_tool_call", approval.make_review_lockdown())
     for schema in WRITE_SCHEMAS:
         ctx.register_tool(name=schema["name"], toolset=TOOLSET, schema=schema,
                           handler=make_write_handler(schema["name"], get_setting, run_context),
@@ -580,17 +593,41 @@ def _register_channel(ctx, state: Any) -> None:
         where = Path(home) if home is not None else profile.current_home()
         return adapter_mod.make_adapter(config, home=where, data_dir=data_dir, get_secret=_default_secret)
 
+    def refuse_target(_chat_id: str) -> str:
+        return ("Forgebrücke takes no messages from send_message or cron delivery; it posts only the answer to a "
+                "mention, in that mention's thread.")
+
     def has_token(*_args) -> bool:
         try:
             return bool((_default_secret("FORGEBRUECKE_BOT_ACCOUNT_TOKEN") or "").strip())
         except Exception:
             return False
 
-    ctx.register_platform(
+    def opted_in(*_args) -> bool:
+        """The gateway's enablement gate: the token plus the profile's own opt-in, the same check the
+        adapter's connect() makes. A token alone must not enable the channel: the gateway would keep
+        rebuilding an adapter that refuses, and Desktop would show the channel down."""
+        if not has_token():
+            return False
+        try:
+            where = Path(home) if home is not None else profile.current_home()
+            return where is not None and not profile.channel_blockers(profile.read_config(where))
+        except Exception:
+            return False
+
+    entry = dict(
         name=profile.PLATFORM, label="Forgebrücke mentions", adapter_factory=factory, check_fn=has_token,
-        is_connected=has_token, required_env=["FORGEBRUECKE_BOT_ACCOUNT_TOKEN"],
+        is_connected=opted_in, required_env=["FORGEBRUECKE_BOT_ACCOUNT_TOKEN"],
         install_hint="Enter Hermes' token in Hermes' settings, then run `hermes forgebruecke doctor`.",
         max_message_length=poller.REPLY_LIMIT, platform_hint=CHANNEL_HINT, display_tier="minimal", emoji="🌉")
+    try:
+        try:
+            ctx.register_platform(**entry, validate_target_ref_fn=refuse_target)
+        except TypeError:  # a Hermes without target validators: send() refuses those targets itself
+            ctx.register_platform(**entry)
+    except RuntimeError as e:  # the plugin host (plugins.isolation: host) cannot run a platform adapter
+        logger.info("forgebruecke: the mention channel is off here (%s). It needs plugins.isolation: in_process; "
+                    "every tool works without it.", e)
 
 
 # --- receipts --------------------------------------------------------------------------------------------

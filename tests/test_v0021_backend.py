@@ -1,4 +1,4 @@
-"""0.0.21 part 1, M1 (PLAN-v0.0.20.md): the version both halves report, the flows note only for flow rows, what
+"""The version both halves report, the flows note only for flow rows, what
 stopped in the background, an unprotected main under Security audit, and a token the plugin host has not
 picked up yet."""
 import json
@@ -35,14 +35,14 @@ def settings_body(tmp_path, f, *, home=None, **values):
                              home=home, refresh=True)[1]
 
 
-# --- version (V2b) ---------------------------------------------------------------------------------
+# --- version ---------------------------------------------------------------------------------------
 
 def test_desk_and_settings_say_which_version_answers(tmp_path):
     assert read(tmp_path, forge())["version"] == VERSION
     assert settings_body(tmp_path, forge())["version"] == VERSION
 
 
-# --- flows note (V6) -------------------------------------------------------------------------------
+# --- flows note ----------------------------------------------------------------------------------
 
 def test_a_late_tick_says_nothing_about_flows_when_no_flow_row_is_on_the_desk(tmp_path):
     body = read(tmp_path, forge(), engine_age=7200)  # review_every_pr gives the tick work, no flow row
@@ -52,7 +52,7 @@ def test_a_late_tick_says_nothing_about_flows_when_no_flow_row_is_on_the_desk(tm
     assert "Flows last ran 2 h ago. Rows of a flow may be out of date." in with_flow["notes"]
 
 
-# --- background (D3) -------------------------------------------------------------------------------
+# --- background ----------------------------------------------------------------------------------
 
 def test_the_settings_page_says_when_the_background_stopped(tmp_path):
     clock = Clock(10_000)
@@ -78,7 +78,7 @@ def test_the_settings_answer_carries_the_background_line(tmp_path):
     assert body["background"]["text"].startswith("Mentions and review requests stopped")
 
 
-# --- unprotected main (D5) -------------------------------------------------------------------------
+# --- unprotected main ----------------------------------------------------------------------------
 
 def test_audit_off_reads_no_branch_rule(tmp_path, monkeypatch):
     calls = []
@@ -107,7 +107,7 @@ def test_audit_on_lists_admin_repos_whose_default_branch_has_no_rule(monkeypatch
     assert seen == [("acme/a", "main"), ("acme/b", "trunk")]  # write-only and archived repos are not read
 
 
-# --- a token the plugin host has not picked up (V13b) -----------------------------------------------
+# --- a token the plugin host has not picked up ---------------------------------------------------
 
 def test_a_token_saved_after_the_plugin_host_started_is_reported(tmp_path, monkeypatch):
     env = tmp_path / ".env"
@@ -141,19 +141,18 @@ def test_the_process_start_is_read_from_proc_on_linux():
     assert 0 < started <= desk.time.time()
 
 
-def test_reload_tokens_ends_only_a_plugin_host_child(tmp_path, monkeypatch):
-    ended = []
-    monkeypatch.delenv(desk.HOST_PROCESS_ENV, raising=False)
-    status, body = desk.api_reload_tokens(data_dir=tmp_path, exit_later=lambda: ended.append(1))
-    assert status == 409 and body["error"] == "not_here" and ended == []
-    monkeypatch.setenv(desk.HOST_PROCESS_ENV, "1")
-    status, body = desk.api_reload_tokens(data_dir=tmp_path, exit_later=lambda: ended.append(1))
-    assert status == 200 and body["ok"] and ended == [1]
+def test_load_it_now_is_logged_and_keeps_only_forgebrueckes_tokens(tmp_path, monkeypatch):
+    monkeypatch.setattr(desk, "_RELOADED", {})
+    monkeypatch.setattr(desk, "_RELOADED_AT", 0.0)
+    status, body = desk.api_reload_tokens(home=tmp_path, data_dir=tmp_path,
+                                          load=lambda home: {"FORGEBRUECKE_BOT_ACCOUNT_TOKEN": BOT, "OTHER": "x"})
+    assert status == 200 and body["ok"]
     line = json.loads((tmp_path / "desk-actions.jsonl").read_text(encoding="utf-8").splitlines()[-1])
-    assert line["action"] == "reload_tokens"
+    assert line["action"] == "reload_tokens" and line["tokens"] == ["FORGEBRUECKE_BOT_ACCOUNT_TOKEN"]
+    assert BOT not in json.dumps(line)
 
 
 def test_the_settings_guard_asks_before_a_shell_reloads_the_plugin_host():
     from test_r2_guard_fails_closed import BASE as ROUTES, HOME
     command = f"curl -s -X POST {ROUTES}/reload-tokens -d '{{}}'"
-    assert "plugin host" in approval.settings_touch("terminal", {"command": command}, HOME)
+    assert "page route" in approval.settings_touch("terminal", {"command": command}, HOME)

@@ -1,5 +1,5 @@
-"""Comment as him from the desk (PLAN-v0.0.21-park.md PK4): the route, its refusals, the read-back, and the
-capability "Comment as you" that his write token's write:issue lights."""
+"""Comment as the user from the desk: the route, its refusals, the read-back, and the
+capability "Comment as you" that the user's write token's write:issue lights."""
 import json
 
 import pytest

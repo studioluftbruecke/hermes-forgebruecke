@@ -1,4 +1,4 @@
-"""Flow data shapes and their validator (PRODUCT.md § The flow model, § Data shapes).
+"""Flow data shapes and their validator.
 
 - ``Gate(type, key, by, lens, max_fix_rounds, contexts, timeout_min, to, then, who, action, labels,
   creators, message)``: one step a change passes. ``type`` is one of ``GATE_TYPES``; ``key`` is the stage
@@ -9,7 +9,7 @@
   rule: every gate when none failed, else the failed gate and everything after it) or ``reset_all``.
   A higher ``version`` runs every gate of every open pull request again.
 - ``GateRun``: the record of one gate on one head commit, stored by ``flows/state.py`` and rendered by
-  the desk. ``state`` is one of ``RUN_STATES``; ``waiting`` is the human gate's state (the merge is his).
+  the desk. ``state`` is one of ``RUN_STATES``; ``waiting`` is the human gate's state (the merge is the user's).
 
 ``validate_flow(raw, ...)`` returns ``(flow or None, errors, warnings)`` and never raises: an invalid flow
 stops that repo's flows and says why, rather than running half of it (rule 6). Parsing YAML text is the
@@ -205,7 +205,7 @@ def _strs(v: Any, where: str, errors: list, pattern: re.Pattern) -> tuple:
 def _gate(i: int, raw: Any, errors: list, warnings: list, *, flow_id: str) -> Optional[dict]:
     where = f"gates[{i}]"
     if isinstance(raw, dict) and len(raw) == 1 and next(iter(raw)) in GATE_TYPES:
-        gtype, body = next(iter(raw.items()))  # the PRODUCT.md shape: - review: {by: devops}
+        gtype, body = next(iter(raw.items()))  # the short form: - review: {by: devops}
         body = body if isinstance(body, dict) else {}
     elif isinstance(raw, dict) and "type" in raw:
         gtype, body = raw.get("type"), {k: v for k, v in raw.items() if k not in ("type", "key")}

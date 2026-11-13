@@ -10,13 +10,20 @@ Safety, each measured or read from Hermes 0.23:
   `plugins disable` leaves a running adapter polling (measured), and resumes when it is enabled again,
   because `plugins enable` builds no new adapter (measured). A lease file makes
   "one poller" structural: the newest adapter to connect owns it, any older one stops for good.
-- It refuses to connect until `platform_toolsets.forgebruecke` is set: a plugin platform's default
-  toolset is Hermes' core set, shell included, and a mention turn starts on a forge user's text.
+- It refuses to connect until `platform_toolsets.forgebruecke` is set, and while it holds a tool that runs
+  commands, writes files or starts agents: a plugin platform's default toolset is Hermes' core set, shell
+  included, and a mention turn starts on a forge user's text.
+- Hermes' command-approval prompt is declined, never posted: in a public thread any commenter would read the
+  command, and nobody there may approve it.
 - Setup notices (Hermes' one-time "no home channel" message) are dropped instead of posted into a
   public thread (`notice_delivery: private` plus a silent `send_private_notice`).
 - Mention turns run on this platform, which the plugin's write gate treats as unattended, so forge
   writes through tools are refused there; the answer itself is the only write.
 - With `dry_run` on it records each mention as an event and sends nothing: no reaction, no turn, no comment.
+- `send()` posts only into a thread whose mention this adapter handed to Hermes within the last hour, and
+  only while the repo's rule keeps mentions on. Hermes calls `send()` for every message to the platform, a
+  cron delivery or `send_message` included; those are refused (the platform's target validator refuses them
+  first), so the only comment the channel posts is the answer to a mention.
 - A mention is marked answered in the ledger after Hermes took it, and the poll cursor moves after that, so
   a failed or interrupted poll answers the mention on a later poll instead of losing it.
 - Hermes gets each mention at least once, and one gateway process hands over a mention Hermes took only
@@ -46,6 +53,11 @@ logger = logging.getLogger(__name__)
 PKG = __package__.rpartition(".")[0]
 DELIVERY_TRIES = 3  # a mention Hermes refuses this often is marked and left alone
 UPDATE_PENDING = "channel-update-pending.json"  # in the data folder; the settings page reads it
+# How long after the hand-off the answer to a mention may be posted: Hermes' turn inactivity timeout
+# (agent.gateway_timeout, 30 minutes by default) plus slack.
+ANSWER_WINDOW_S = 3600
+NOT_ANSWERING = ("Forgebrücke posts only the answer to a mention, into the thread of that mention. "
+                 "Nothing was posted.")
 PLUGIN_YAML = Path(__file__).resolve().parents[1] / "plugin.yaml"
 
 
@@ -82,6 +94,7 @@ class ForgejoMentionAdapter(BasePlatformAdapter):
         self._failed: dict = {}  # mention key -> deliveries that raised
         self._handed: set = set()  # keys whose hand-off is over while their ledger entry is not on disk yet
         self._dry_seen: set = set()  # keys the last dry-run poll recorded; the next poll finds them again
+        self._answering: dict = {}  # thread -> when its latest mention was handed to Hermes
         self._version = self._loaded_version()  # the code this adapter was built from
         extra = config.extra if isinstance(getattr(config, "extra", None), dict) else {}
         if not isinstance(getattr(config, "extra", None), dict):
@@ -339,6 +352,7 @@ class ForgejoMentionAdapter(BasePlatformAdapter):
         source = self.build_source(chat_id=m.thread, chat_name=f"{m.thread} {m.title}"[:120], chat_type="dm",
                                    user_id=m.author, user_name=m.author, message_id=message_id)
         self._event("deliver", key=m.key, author=m.author)
+        self._answering[m.thread] = self._now()
         await self.handle_message(MessageEvent(text=poller.frame(m, self._bot), message_type=MessageType.TEXT,
                                                source=source, message_id=message_id, raw_message=None,
                                                timestamp=datetime.now(timezone.utc)))
@@ -359,14 +373,18 @@ class ForgejoMentionAdapter(BasePlatformAdapter):
         if not self._client or not repo or not number.isdigit():
             return SendResult(success=False, error=f"not a Forgejo thread: {chat_id!r}")
         try:
-            dry_run = self._settings().dry_run
+            settings = self._settings()
         except Exception as e:
             self._event("send_failed", chat=chat_id, error=f"settings unreadable: {type(e).__name__}")
             return SendResult(success=False, error=f"Hermes' settings could not be read ({type(e).__name__}).")
-        if dry_run:
+        if settings.dry_run:
             self._event("send_skipped", chat=chat_id, reason="Preview is on")
             return SendResult(success=False, error="Preview is on, so nothing was posted to Forgejo. "
                                                    "Switch it off on the Forgebrücke page.")
+        handed = self._answering.get(str(chat_id))
+        if handed is None or self._now() - handed > ANSWER_WINDOW_S or not settings.rule_for(repo).mentions:
+            self._event("send_refused", chat=chat_id, reason="no mention of this thread is being answered")
+            return SendResult(success=False, error=NOT_ANSWERING)
         poller = _mod("channel.poller")
         footer = _mod("tools.write").FOOTER
         parts = poller.split_reply(content, poller.REPLY_LIMIT - len(footer))
@@ -383,6 +401,17 @@ class ForgejoMentionAdapter(BasePlatformAdapter):
             last_id = (resp.data or {}).get("id")
         self._event("send", chat=chat_id, parts=len(parts), comment=last_id)
         return SendResult(success=True, message_id=str(last_id) if last_id else None)
+
+    async def send_exec_approval(self, chat_id: str, command: str, session_key: str, **_: Any) -> SendResult:
+        # Declined before anything is rendered: Hermes' own version first posts a long command in full.
+        return await self._send_exec_approval_prompt(None)
+
+    async def _send_exec_approval_prompt(self, prompt: Any) -> SendResult:
+        # A decline (not a failure) keeps Hermes from posting the prompt as plain text instead.
+        self._event("approval_declined", reason="a mention thread is public; nobody there may approve a command")
+        return SendResult(success=False, error="egress declined: a Forgejo mention thread cannot approve commands",
+                          raw_response={"success": False, "code": "egress_declined",
+                                        "error": "a Forgejo mention thread cannot approve commands"})
 
     async def send_private_notice(self, chat_id: str, user_id: Optional[str], content: str,
                                   reply_to: Optional[str] = None,

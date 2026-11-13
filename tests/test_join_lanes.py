@@ -5,6 +5,7 @@ import subprocess
 
 from fb_fakes import BASE, DEMO, FakeForgejo, bot_account, make_token, sample_data, sub
 from fb_fakes_engine import Kit, engine_env  # noqa: F401
+from fb_fakes_rr_engine import review_home
 
 runner_mod = sub("flows.runner")
 approval = sub("approval")
@@ -17,8 +18,8 @@ class RestartedRunner(runner_mod.ReviewRunner):
     """The real ``alive`` and ``stop``. ``start`` leaves what a worker of an earlier gateway process left: a
     pid record whose start time is not the one that pid has today."""
 
-    def __init__(self, pid: int) -> None:
-        super().__init__()
+    def __init__(self, pid: int, home) -> None:
+        super().__init__(home=home)
         self.pid = pid
 
     def start(self, *, profile, prompt_path, log_path):
@@ -30,7 +31,7 @@ def test_a_pid_another_process_reused_is_never_signalled_by_the_engine(tmp_path)
     bystander = subprocess.Popen(["sleep", "60"], start_new_session=True)
     try:
         k = Kit(tmp_path)
-        k.runner = RestartedRunner(bystander.pid)
+        k.runner = RestartedRunner(bystander.pid, review_home(tmp_path / "root"))
         k.tick()
         assert k.gates()["review"]["state"] == "running"
         k.clock.t += 5 * 60
@@ -128,7 +129,7 @@ def test_a_tick_that_died_after_the_start_takes_the_real_runners_worker_over(tmp
         return workers[-1]
 
     k = Kit(tmp_path)
-    k.runner = runner_mod.ReviewRunner(popen=popen)
+    k.runner = runner_mod.ReviewRunner(popen=popen, home=review_home(tmp_path / "root"))
     start = k.runner.start
 
     def start_then_die(**kw):
@@ -142,7 +143,7 @@ def test_a_tick_that_died_after_the_start_takes_the_real_runners_worker_over(tmp
             raise AssertionError("the tick was meant to stop after the start")
         except Stopped:
             pass
-        assert k.state() is None and len(workers) == 1
+        assert k.gates()["review"]["state"] == "pending" and len(workers) == 1  # no saved state knows the worker
         k.runner.start = start
         k.tick()
         review = k.gates()["review"]

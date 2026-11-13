@@ -1,5 +1,5 @@
-"""FB-4: the desk's load time. Its time went into Forgejo answers read one after another (44 reads, 11 s on the
-live Forgejo; experiments/forgebruecke/desk-load-time). Independent reads now overlap, at most PARALLEL_READS at
+"""The desk's load time. Its time went into Forgejo answers read one after another (44 reads, 11 s measured on a
+live Forgejo). Independent reads now overlap, at most PARALLEL_READS at
 once, and the number of reads one desk answer costs is pinned, so a change that adds reads fails here."""
 import copy
 import threading
@@ -157,7 +157,7 @@ def test_parallel_map_keeps_the_order_and_raises_the_first_error():
 
 
 def test_parallel_map_starts_no_call_after_an_error():
-    """R149-3: a 429 (or any error) on one read must not send the reads still queued. Only the calls already
+    """A 429 (or any error) on one read must not send the reads still queued. Only the calls already
     running when it failed finish. Each call takes 50 ms; item 5 fails at once, so items 0-7 have started by then
     and 8-19 never start (before the fix: up to item 12, since the queue ran on until the result of item 4)."""
     started, lock = set(), threading.Lock()

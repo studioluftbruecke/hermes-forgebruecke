@@ -1,4 +1,4 @@
-"""M4b and 0.0.14: the lane matrix, Forgejo's collaborator right as the only permission layer (D27), the
+"""The lane matrix, Forgejo's collaborator right as the only permission layer, the
 capability registry per setup, the mention-read leak, the write token of the user's account kept away from
 agent writes, and a token of the wrong account flagged."""
 import json
@@ -44,7 +44,7 @@ def recorder(f):
     return call
 
 
-# The retired read token's env name, set on purpose: 0.0.14 never reads it (D29).
+# The retired read token's env name, set on purpose: it is never read.
 SECRETS = {"bot": ("FORGEBRUECKE_BOT_ACCOUNT_TOKEN", BOT), "read": ("FORGEBRUECKE_PERSONAL_READ_TOKEN", READ),
            "owner": ("FORGEBRUECKE_PERSONAL_WRITE_TOKEN", OWNER)}
 
@@ -67,8 +67,8 @@ def access(lane="agent", scope="", tokens=("bot", "read", "owner"), f=None, valu
     ("owner", ("bot", "read", "owner"), "owner"),
 ])
 def test_lane_matrix_for_reads(lane, tokens, expected):
-    """D29: the agent lane reads with the agent token only; neither the retired read token nor the user's write
-    token widens what the desk and his chats see."""
+    """The agent lane reads with the agent token only; neither the retired read token nor the user's write
+    token widens what the desk and the user's chats see."""
     a, f = access(lane, DEMO if lane in ("mention", "flow") else "", tokens)
     a.reader().get(f"/repos/{DEMO}")
     assert token_used(f) == expected and a.read_role == expected
@@ -126,7 +126,7 @@ def test_agent_tool_write_never_uses_the_owner_token():
     assert out["ok"] and token_used(f) == "bot"
 
 
-# --- Forgejo is the permission layer (D27) --------------------------------------------------------------
+# --- Forgejo is the permission layer --------------------------------------------------------------
 
 def test_write_on_a_read_only_repo_is_refused_with_the_right_and_the_collaboration_page():
     a, f = access()

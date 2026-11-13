@@ -1,4 +1,4 @@
-"""D33: every open pull request asks you to review it. The tick asks where a pull request does not (whatever
+"""Every open pull request asks you to review it. The tick asks where a pull request does not (whatever
 opened it), exactly once, and never where you opened it, already reviewed it, or Hermes may only read."""
 import json
 

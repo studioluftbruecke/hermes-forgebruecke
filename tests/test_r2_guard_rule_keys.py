@@ -24,11 +24,23 @@ def test_two_actions_of_one_tool_on_one_repo_have_two_rule_keys(tmp_path):
     key = gate(tmp_path)
     resume = key("forgejo_flows", action="resume", flow="demo", repo=DEMO)
     replace = key("forgejo_flows", action="set", repo=DEMO, template="one-review-then-me", target="local")
-    assert resume == f"forgebruecke:forgejo_flows:resume:{DEMO}"
-    assert replace == f"forgebruecke:forgejo_flows:set:{DEMO}"
+    assert resume.startswith(f"forgebruecke:forgejo_flows:resume:{DEMO}:")
+    assert replace.startswith(f"forgebruecke:forgejo_flows:set:{DEMO}:")
     pack = key("forgejo_repos", action="pack", repo=DEMO)
     preset = key("forgejo_repos", action="preset", repo=DEMO)
-    assert pack == f"forgebruecke:forgejo_repos:pack:{DEMO}" and preset == f"forgebruecke:forgejo_repos:preset:{DEMO}"
+    assert pack == f"forgebruecke:forgejo_repos:pack:{DEMO}"
+    assert preset.startswith(f"forgebruecke:forgejo_repos:preset:{DEMO}:")
+
+
+def test_always_on_a_flow_covers_that_flow_only(tmp_path):
+    """A flow decides which writes run unattended, so one "always" must not cover the next, different flow."""
+    key = gate(tmp_path)
+    one = key("forgejo_flows", action="set", repo=DEMO, template="one-review-then-me", target="local")
+    again = key("forgejo_flows", action="set", repo=DEMO, template="one-review-then-me", target="local")
+    other = key("forgejo_flows", action="set", repo=DEMO, template="staging-first", target="local")
+    assert one == again and one != other
+    assert key("forgejo_flows", action="resume", flow="demo", repo=DEMO) != \
+        key("forgejo_flows", action="resume", flow="other", repo=DEMO)
 
 
 def test_a_tool_with_one_action_keeps_its_key(tmp_path):

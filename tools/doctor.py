@@ -24,7 +24,8 @@ roles are ``hermes`` and ``user``):
 Scope detection has no side effects: reads probe a GET; write scopes are probed with requests Forgejo
 rejects after its scope check (an empty-body POST answers 422, a write to a thread or commit
 that does not exist answers 404), measured on Forgejo 15.0.11. A missing scope answers 403 naming
-it. Nothing here prints or returns a token.
+it. Nothing here prints or returns a token. With ``owner_probe`` False (the agent's tool and the CLI) the
+user's personal write token is never sent; the report says it is set and checked on the settings page.
 """
 from __future__ import annotations
 
@@ -195,7 +196,12 @@ def _next(report: dict, action: str, text: str = "", hint: str = "") -> dict:
     return report
 
 
-def run_doctor(settings, creds, *, client_factory: Callable[[str, str], Any], channel: Optional[dict] = None) -> dict:
+OWNER_UNCHECKED = "Set. Forgebrücke checks it only on its settings page, on your click."
+OWNER_FEATURES = ("owner_merge", "owner_comment")
+
+
+def run_doctor(settings, creds, *, client_factory: Callable[[str, str], Any], channel: Optional[dict] = None,
+               owner_probe: bool = True) -> dict:
     """Never raises: every failure becomes part of the report."""
     client_mod = _mod("client")
     problems = list(getattr(creds, "problems", list)())
@@ -211,7 +217,7 @@ def run_doctor(settings, creds, *, client_factory: Callable[[str, str], Any], ch
     if not creds.token:
         report["tokens"].append({"role": "bot", "env": env.TOKEN_ENV, "set": False})
     try:
-        probe_client = client_factory(settings.url, creds.token or creds.owner_token)
+        probe_client = client_factory(settings.url, creds.token or (creds.owner_token if owner_probe else None))
         caps = probe_client.capabilities(refresh=True)
         report["instance"].update(caps.to_dict())
     except client_mod.ForgejoError as e:
@@ -223,7 +229,9 @@ def run_doctor(settings, creds, *, client_factory: Callable[[str, str], Any], ch
     if creds.token:
         bot = token_report(client_factory(settings.url, creds.token), "bot", env.TOKEN_ENV)
         report["tokens"].append(bot)
-    if creds.owner_token:
+    if creds.owner_token and not owner_probe:
+        report["tokens"].append({"role": "owner", "env": env.OWNER_TOKEN_ENV, "set": True, "note": OWNER_UNCHECKED})
+    elif creds.owner_token:
         owner = token_report(client_factory(settings.url, creds.owner_token), "owner", env.OWNER_TOKEN_ENV)
         report["tokens"].append(owner)
     else:
@@ -231,6 +239,11 @@ def run_doctor(settings, creds, *, client_factory: Callable[[str, str], Any], ch
                                  "note": "Optional. Only for the desk's Merge and Comment buttons."})
     reports = {k: v for k, v in (("bot", bot), ("owner", owner)) if v is not None}
     report["features"], warnings, found = features(reports, settings, caps, channel)
+    if creds.owner_token and not owner_probe:
+        for feature in report["features"]:
+            if feature["id"] in OWNER_FEATURES:
+                feature.update(status="off", reason=f"Your write token: {OWNER_UNCHECKED[:1].lower()}{OWNER_UNCHECKED[1:]}")
+                feature.pop("light_with", None)
     report["token_warnings"] = problems + warnings
     if (channel or {}).get("approvals_off"):
         report["settings"]["warnings"].append("Hermes approvals are off in this profile, so Forgebrücke's writes "

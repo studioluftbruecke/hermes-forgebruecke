@@ -6,7 +6,7 @@ account on its own feature branches, and the merge into `main` stays yours.
 
 ![The Forgejo desk in Hermes Desktop](docs/screenshot-1.png)
 
-Version 0.0.24. MIT. A Studio Luftbrücke Hermes plugin.
+Version 0.0.25. MIT. A Studio Luftbrücke Hermes plugin.
 
 ## What it does
 
@@ -111,16 +111,18 @@ Optional:
 | `audit_enabled` | off | Allow the read-only audit |
 | `writes` | empty | One rule per repo: `repo_glob`, `flows`, `mentions`, `targets` |
 | `flows_path` | `.forgebruecke/flows.yml` | Where a repo keeps its flow |
-| `default_review_profile` | this profile | Profile that runs a flow's review |
+| `default_review_profile` | this profile | Profile that runs a flow's review; it needs Forgebrücke enabled |
 | `mention_authors` | everyone with write access | Narrows whose mentions get an answer |
 | `poll_interval` | 30 | Seconds between polls of Forgejo (30 to 3600) |
 
 ## Disclosures
 
 - **Network.** Only your Forgejo, polled on your interval. The doctor also reads its
-  `/swagger.v1.json`.
+  `/swagger.v1.json`. While Desktop is visible, the desk page reads every 30 s and the settings
+  page every 2 min. The sidebar count reads every minute, or your interval if longer. A hidden
+  Desktop reads nothing.
 - **Scope detection.** The doctor learns a token's write scopes from requests Forgejo must reject:
-  empty `POST`s and a `PATCH` of a missing notification.
+  empty `POST`s and a `PATCH` of a missing notification. Only the settings page checks your write token.
 - **Credentials.** Two tokens in your profile's `.env`, written by Hermes' settings. Any agent shell
   on that host can read them. The plugin never reads `FORGEJO_TOKEN` or another tool's token.
 - **Writes, under Hermes' approval setting.**
@@ -139,22 +141,39 @@ Optional:
 - **Unattended agent turns.** A mention by someone with write access starts a turn without you. The
   turn gets only the tools `platform_toolsets.forgebruecke` names, reads only its thread's repo and
   cannot write through tools. Its answer is posted as Hermes' account. Issue and comment text is
-  untrusted input.
-- **Background processes.** A flow's review gate starts `hermes -p <profile> chat --query-file …`,
-  at most two at once. Each gets a minimal environment, no Forgejo access, and writes a verdict file.
-- **The desk.** The page calls only this plugin's routes on your Hermes backend. Your write token merges
-  (`/merge`, pinned to the shown commit) and reads your merge rights (`/desk`, `/repo-pulls`). `/comment` posts your words as you.
-  `/park` and `/unpark` write only `parked.json`. `/setting` saves `you` and the four
-  switches. "Create a reviewer profile" runs `hermes profile create`, then
-  `hermes config unset` for both tokens. `/reload-tokens` restarts the plugin host to read a new
-  token. "Ask Hermes" opens a chat with a draft and sends nothing.
-  A process that can call these routes can do the same, so keep Hermes' approvals on.
+  untrusted input. A tool list with the shell, file writes, code, memory or past-session search keeps
+  the channel off. The channel posts only answers, into the thread of a mention from the last hour on
+  a repo whose rule allows mentions. A cron delivery or `send_message` aimed at it is refused.
+- **Background ticks.** While a flow or review requests are on, a loop in the Hermes gateway ticks
+  every `poll_interval` seconds. A tick reads open pull requests, starts review workers and sends
+  what a flow names. The mention channel ticks too. If neither runs, the settings page says so; then
+  run `hermes -p <profile> forgebruecke tick` from cron, for example every five minutes.
+- **Review workers.** A flow's review gate starts `hermes -p <profile> chat --query-file <prompt>
+  -t no_mcp --ignore-rules -Q`, at most two at once. That profile must have Forgebrücke enabled;
+  otherwise the gate ends in an error that names the command to enable it. The turn runs in that
+  profile's gateway with its model. It gets no memory, `SOUL.md`, built-in toolsets or MCP servers.
+  Hermes still offers it the tool-search bridge and the profile's plugin tools, and Forgebrücke
+  refuses every call. The prompt holds the pull request's text and diff, which its author controls.
+  The worker writes nothing; its answer is the verdict. Its summary and findings are posted on the
+  pull request as plain text, cut to a fixed length. Links, issue and commit references, HTML and
+  mentions in them are made inert.
+- **The desk.** The page calls only this plugin's routes on your Hermes backend. Your write token
+  merges (`/merge`, pinned to the shown commit) and reads your merge rights (`/desk`,
+  `/repo-pulls`). `/comment` posts your words as you. `/park` and `/unpark` write only
+  `parked.json`. `/setting` saves `you` and the four switches through `hermes config set`. "Create a
+  reviewer profile" asks first. It runs `hermes profile create --clone-from`, which copies
+  `config.yaml`, `SOUL.md` and the `.env` with all its keys. Then `hermes memory reset` erases the
+  copy's memories and `hermes config unset` removes Forgebrücke's two tokens. `/reload-tokens` reads
+  those two tokens again through Hermes' secret loader and keeps them in memory; it restarts
+  nothing. "Ask Hermes" opens a chat with a draft and sends nothing. A process that can call these
+  routes can do the same, so keep Hermes' approvals on.
 - **Guard.** A tool call that would edit the profile's settings or secrets, this plugin's files or
   its data folder asks you first. The guard catches direct routes, not every script.
 - **Git credential helper** (only where you set it up). It prints Hermes' token for your Forgejo
-  address, nothing for another host, and never your write token.
-- **Process and state.** The plugin runs inside the Hermes gateway. State, run records,
-  `receipts.jsonl`, `desk-actions.jsonl` and `lessons.json` live in your profile's plugin data folder.
+  address, nothing for another host, and never your write token. Git keeps no cached copy.
+- **Process and state.** The plugin runs inside the Hermes gateway. Under `plugins.isolation: host`
+  it loads without the mention channel. State, run records, `receipts.jsonl`, `desk-actions.jsonl`
+  and `lessons.json` live in your profile's plugin data folder.
 - **`@forgejo:` in any message expands**, including text you paste.
 - No telemetry, no hosted service.
 

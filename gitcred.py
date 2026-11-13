@@ -1,5 +1,6 @@
 """A git credential helper backed by the agent account token, so git in any shell on the host can
-push and pull as Hermes' Forgejo account without a second copy of the token.
+push and pull as Hermes' Forgejo account without a second copy of the token: the setup it prints adds no
+credential cache, so git asks Hermes on every push and pull.
 
 Git runs ``hermes -p <profile> forgebruecke git-credential get`` and writes the request on stdin
 (``protocol=https``, ``host=forge.example``, one ``key=value`` per line, a blank line at the end).
@@ -23,7 +24,6 @@ from dataclasses import dataclass
 from typing import Mapping, Optional
 
 ACTIONS = ("get", "store", "erase")
-CACHE_HELPER = "cache --timeout=3600"
 DEFAULT_USERNAME = "forgebruecke"
 _DEFAULT_PORTS = {"https": 443, "http": 80}
 
@@ -91,18 +91,17 @@ def setup_text(forge_url: str, profile: str, hermes: str) -> str:
     ours = shlex.quote(f'!f() {{ if [ "$1" = get ]; then exec {hermes} -p {profile} forgebruecke '
                        'git-credential get; fi; }; f')
     lines = [f"git config --global --replace-all {key} ''",
-             f"git config --global --add {key} {shlex.quote(CACHE_HELPER)}",
              f"git config --global --add {key} {ours}"]
     return "\n".join([
         f"Git can push and pull at {origin.scheme}://{origin.host} as Hermes' account, with Hermes' token of "
-        f"the profile {profile}. Run these three lines in the shell whose git "
+        f"the profile {profile}. Run these two lines in the shell whose git "
         "should use it (they write that shell's ~/.gitconfig):",
         "",
         *(f"  {line}" for line in lines),
         "",
         "The empty helper line makes Forgebrücke the only helper for this Forgejo; other hosts keep "
-        "theirs. The cache keeps the answer in memory for an hour, so git does not start Hermes on "
-        "every push. For one clone that several profiles share, run the same lines with "
+        "theirs. Git starts Hermes for each push and pull and keeps no copy of the token. For one clone "
+        "that several profiles share, run the same lines with "
         "`git -C <clone> config --local` in place of `git config --global`.",
         "",
     ])

@@ -1,5 +1,5 @@
-"""The Desktop half's contract, checked without a browser (the render itself is proven by the off-device
-harness under experiments/, the real components by the check on the Mac)."""
+"""The Desktop half's contract, checked without a browser (the render and the real components are checked
+outside this suite)."""
 import json
 import re
 import shutil
@@ -91,7 +91,7 @@ def test_ask_hermes_drafts_a_reference_and_never_sends():
     assert "return '@forgejo:' + row.repo + '#' + row.number + ' ' + (sentence || '')" in ask
     chat = part("async function openChat(text)", "const QUESTIONS")
     assert "tabTitle: CHAT_TITLE" in chat and "storage.get(storageKey, null)" in chat and "host.newChat" in chat
-    assert "const CHAT_TITLE = 'Forgebrücke'" in SOURCE  # D5 of the sidebar-rows plan (0.0.22)
+    assert "const CHAT_TITLE = 'Forgebrücke'" in SOURCE  # the chat tab carries the plugin's name
     assert ".submit(" not in SOURCE and "session.send" not in SOURCE and "prompt.submit" not in SOURCE
 
 
@@ -100,7 +100,7 @@ def test_the_you_note_offers_the_login_in_one_click_and_the_repos_tab_follows_th
     who = part("function WhoAreYou(", "function WaitingNote(")
     assert "save('you', login)" in who and "'Use @' + login" in who and "'Open settings'" in who
     repos = part("function Repos(", "function MergeDialog(")
-    card = part("function RepoCard(", "function Repos(")  # FB-3: the per-repo fields moved into the card
+    card = part("function RepoCard(", "function Repos(")  # the per-repo fields live in the card
     for field in ("card.collaboration_url", "card.open_prs", "card.mentions", "card.flows", "card.right === 'read'"):
         assert field in card, field
     assert "SearchField" in repos and "repos.length > FILTER_ABOVE" in repos and "const FILTER_ABOVE = 8" in SOURCE

@@ -1,4 +1,4 @@
-"""The three flow templates shipped with v0.1 (PRODUCT.md § Templates), as data.
+"""The three flow templates, as data.
 
 ``render(name, repo, review_profile, owner)`` returns the file shape (one-key gate maps, the way a
 person writes ``.forgebruecke/flows.yml``); ``models.flow_to_yaml`` turns it into the file text.

@@ -29,10 +29,13 @@ def read_config(home: Path) -> dict:
     before a `hermes config set` (measured), so a switch the user flipped was not seen."""
     path = Path(home) / "config.yaml"
     try:
-        import hermes_yaml as yaml  # what Hermes itself reads config.yaml with
-    except ImportError:
+        from hermes_cli.config import read_config_doc  # Hermes' own reader of a profile's config file
+    except ImportError:  # outside Hermes (the plugin's own tests without it)
         import yaml
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+        def read_config_doc(p):
+            return yaml.safe_load(Path(p).read_text(encoding="utf-8"))
+    data = read_config_doc(path) or {}
     return data if isinstance(data, dict) else {}
 
 
@@ -72,6 +75,23 @@ def setting_getter(config: dict):
     return get
 
 
+# Tools and Hermes toolsets that run commands, write files, start other agents or jobs, write the memory every later
+# session reads, or read the owner's past sessions. A mention turn starts on a Forgejo commenter's text, so none of
+# them may be in its toolset. Every `hermes-<platform>` bundle carries the shell; `hermes-webhook` is the one
+# read-only bundle.
+HOST_TOOLS = frozenset({"terminal", "process_manage", "execute_code", "write_file", "patch", "delegate_task",
+                        "cronjob_manage", "skill_manage", "browser_exec", "browser_cdp", "computer_use", "memory",
+                        "session_search"})
+HOST_TOOLSETS = frozenset({"terminal", "file", "code_execution", "debugging", "coding", "delegation", "cronjob",
+                           "skills", "browser", "computer_use", "kanban", "memory", "session_search"})
+
+
+def reaches_host(name: str) -> bool:
+    name = str(name).strip().lower()
+    return (name in HOST_TOOLS or name in HOST_TOOLSETS
+            or (name.startswith("hermes-") and name != "hermes-webhook"))
+
+
 def channel_toolsets(config: dict) -> Optional[list]:
     value = (config.get("platform_toolsets") or {}).get(PLATFORM)
     return list(value) if isinstance(value, (list, tuple)) else None
@@ -89,10 +109,18 @@ def channel_blockers(config: dict, profile_name: str = "") -> list:
     if not (isinstance(platform, dict) and platform.get("enabled", True) is not False):
         out.append(f"the profile has no platforms.{PLATFORM} block ({hermes} config set platforms.{PLATFORM} "
                    "'{enabled: true}')")
-    if channel_toolsets(config) is None:
+    toolsets = channel_toolsets(config)
+    if toolsets is None:
         out.append(f"platform_toolsets.{PLATFORM} is not set, so a mention turn would get Hermes' default "
                    f"tools, shell included; set it to the tools a Forgejo commenter may trigger, for example "
                    f"{hermes} config set platform_toolsets.{PLATFORM} '[forgebruecke]'")
+    else:
+        risky = [str(t) for t in toolsets if reaches_host(t)]
+        if risky:
+            out.append(f"platform_toolsets.{PLATFORM} holds {', '.join(risky)}, which can run commands, write files, "
+                       f"start agents or reach Hermes' memory on this host for any Forgejo commenter; remove them, "
+                       f"for example "
+                       f"{hermes} config set platform_toolsets.{PLATFORM} '[forgebruecke]'")
     return out
 
 

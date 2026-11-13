@@ -1,18 +1,18 @@
-"""The desk's parking area: pull requests he set aside under Waiting for me. They stay open in Forgejo, leave
-the count, and come back on their own (PLAN-v0.0.21-park.md § 3 to § 5).
+"""The desk's parking area: pull requests the user set aside under Waiting for me. They stay open in Forgejo, leave
+the count, and come back on their own.
 
-Store ``<data_dir>/parked.json``, private to this profile (decision D-48)::
+Store ``<data_dir>/parked.json``, private to this profile::
 
     {"version": 1, "parked": {"owner/repo#n": {repo, number, note, parked_at, wake_commits,
                                                 seen{head_sha, comment_at, draft}}}}
 
-The key is ``owner/repo#n`` in lower case; ``repo`` keeps Forgejo's spelling. ``seen`` is the row as he saw it
-when he parked it. Only his click parks (no tool can, L1). Writers (the park routes and the desk's prune) take
+The key is ``owner/repo#n`` in lower case; ``repo`` keeps Forgejo's spelling. ``seen`` is the row as the user saw it
+when parking it. Only the user's click parks (no tool can). Writers (the park routes and the desk's prune) take
 ``fcntl.flock`` on ``parked.lock``, re-read the file under the lock, apply only their own change and replace
-the file atomically; reads take no lock. Each write logs one line to ``desk-actions.jsonl`` (L7).
+the file atomically; reads take no lock. Each write logs one line to ``desk-actions.jsonl``.
 
 Waking is computed on every desk read and never written (``wake``): a draft marked ready, new commits (when
-``wake_commits``), or a newer comment by someone other than him, first match wins (L4).
+``wake_commits``), or a newer comment by someone other than the user, first match wins.
 """
 from __future__ import annotations
 
@@ -96,7 +96,7 @@ def _log(data_dir: Any, record: dict) -> dict:
 
 
 def seen_of(row: dict) -> dict:
-    """The fingerprint of a desk row as he sees it: what a later read compares against."""
+    """The fingerprint of a desk row as the user sees it: what a later read compares against."""
     wake = row.get("wake_comment") or {}
     draft = row.get("draft")
     return {"head_sha": str(row.get("head_sha") or ""), "comment_at": wake.get("at"),

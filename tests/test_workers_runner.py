@@ -190,7 +190,7 @@ def test_a_worker_this_process_already_saw_end_is_not_signalled_again(tmp_path, 
 
 def prompt(diff, title="Fix calc.mul", body="Fixes mul."):
     return runner_mod.build_prompt(flow_id="demo", gate_key="review", lens="correctness", repo=DEMO, pr=3, title=title,
-                                   body=body, head_sha=HEAD_SHA, diff=diff, verdict_path=Path("verdict.json"),
+                                   body=body, head_sha=HEAD_SHA, diff=diff,
                                    fix_round=1, max_rounds=3)
 
 

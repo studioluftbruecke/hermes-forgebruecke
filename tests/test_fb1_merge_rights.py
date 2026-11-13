@@ -1,10 +1,9 @@
-"""FB-1 (feedback 2026-11-12): the Merge button follows Forgejo's merge right for his account, and a merged pull
+"""The Merge button follows Forgejo's merge right for the user's account, and a merged pull
 request leaves Waiting for me at once.
 
-Konstantin: "I should always see a merge button if I have permission to merge." His example, hermes-plugins#143,
-never requested his review (its timeline holds no review request), so the desk listed it as "review not requested
-yet", and only "review requested" rows offered Merge. And: "Update list of "Waiting for me" directly after having
-merged a PR." Three sources kept a merged row: a flow's stored state says open until the next tick, a desk build
+A user who may merge should always see a Merge button. A pull request that never requested the user's review
+(its timeline holds no review request) was listed as "review not requested yet", and only "review requested"
+rows offered Merge. A merged pull request must leave "Waiting for me" at once. Three sources kept a merged row: a flow's stored state says open until the next tick, a desk build
 that began before the merge cached its answer after it, and the merge dropped the write-token facts, so the next
 read reran the doctor's probes."""
 import json
@@ -69,7 +68,7 @@ def merge(tmp_path, f, n):
     return desk.api_merge(gs, sec, {"repo": DEMO, "number": n, "head_sha": HEAD_SHA}, data_dir=tmp_path, transport=f)
 
 
-# --- F6: Merge whenever Forgejo lets his account merge ------------------------------------------------
+# --- Merge whenever Forgejo lets the user's account merge ------------------------------------------------
 
 def test_a_pr_that_never_asked_for_his_review_offers_merge_and_merges(tmp_path):
     f = forge()
@@ -83,8 +82,8 @@ def test_a_pr_that_never_asked_for_his_review_offers_merge_and_merges(tmp_path):
 
 
 def test_the_merge_right_is_forgejos_answer_for_his_account_on_the_base_branch(tmp_path):
-    """Hermes' account may not merge into main (as on hermes-plugins, measured: user_can_merge False for
-    hermes), his may: the row offers Merge. Then the rule takes his merge right away: no Merge, and the
+    """Hermes' account may not merge into main (measured: user_can_merge False for
+    hermes), the user's may: the row offers Merge. Then the rule takes the user's merge right away: no Merge, and the
     review row's main button is Review in Forgejo again."""
     f = forge()
     branch = f.data[DEMO]["branches"]["main"]
@@ -111,7 +110,7 @@ def test_no_merge_without_a_base_branch_answer_or_on_a_draft(tmp_path):
 
 
 def test_a_flow_row_reads_the_merge_right_on_the_base_forgejo_returned_in_the_same_build(tmp_path):
-    """R149-2: after a retarget the stored flow state still names the old base until the next tick. The row
+    """After a retarget the stored flow state still names the old base until the next tick. The row
     takes the base from the pull request Forgejo listed in this desk build, so the right is read for the
     branch the merge would go into, and the dialog names it."""
     f = forge()
@@ -127,7 +126,7 @@ def test_a_flow_row_reads_the_merge_right_on_the_base_forgejo_returned_in_the_sa
     assert not [c for c in f.calls if c[1].endswith(f"/repos/{DEMO}/branches/main")]
 
 
-# --- F5: the merged row leaves at once ----------------------------------------------------------------
+# --- the merged row leaves at once ----------------------------------------------------------------
 
 def test_a_merged_flow_row_leaves_the_desk_before_the_flows_tick(tmp_path):
     f = forge()
@@ -190,6 +189,6 @@ def test_the_desktop_drops_the_merged_row_on_the_click():
     assert out[0]["counts"] == {"waiting": 1, "parked": 1, "running": 1, "blocked": 0}
     assert out[0]["label"] == "Forgebrücke · 1" and out[1] is True and out[2] is None
     dialog = SOURCE[SOURCE.index("function MergeDialog("):SOURCE.index("// ── the desk page")]
-    # FB-3: the dialog calls withMerged, which is withoutRow plus the repo's open pull request count.
+    # the dialog calls withMerged, which is withoutRow plus the repo's open pull request count.
     assert dialog.index("withMerged(client.getQueryData(key), row)") < dialog.index("invalidateQueries")
     assert "const next = withoutRow(data, row.id) || data" in SOURCE

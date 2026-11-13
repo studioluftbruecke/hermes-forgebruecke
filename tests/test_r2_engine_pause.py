@@ -67,7 +67,7 @@ def test_a_paused_review_whose_worker_is_gone_ends_in_error_and_frees_the_slot(t
     k.runner.dead.add(1001)
     k.tick()
     review = k.gates()["review"]
-    assert review["state"] == "error" and "ended without writing a verdict" in review["detail"]
+    assert review["state"] == "error" and "ended without an answer" in review["detail"]
     assert k.store.running_reviews() == 0 and k.statuses()["forgebruecke/demo/review"] == "error"
     sent = len(k.forge.writes)
     assert k.tick()["prs"] == [] and len(k.forge.writes) == sent

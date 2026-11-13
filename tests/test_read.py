@@ -111,7 +111,7 @@ def test_reads_use_the_agent_token_even_when_the_retired_read_token_is_set():
 
 
 def test_retired_read_scope_and_read_false_no_longer_block_reads():
-    """D27: Forgejo decides what Hermes sees; the old settings only add a warning."""
+    """Forgejo decides what Hermes sees; the old settings only add a warning."""
     out, forge = call("forge_get", {"kind": "repo", "repo": DEMO},
                       settings={"read_scope": "rules", "writes": [{"repo_glob": "acme/*", "read": False}]})
     assert out["ok"] and out["repo"]["my_access"] == "write"

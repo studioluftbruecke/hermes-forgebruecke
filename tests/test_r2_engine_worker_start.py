@@ -60,7 +60,7 @@ def test_a_tick_that_died_right_after_the_start_takes_the_living_worker_over(tmp
     Deaths(k, 1, "after_start")
     with pytest.raises(Stopped):
         k.tick()
-    assert k.state() is None
+    assert k.gates()["review"]["state"] == "pending"  # no saved state knows the worker
     k.tick()
     review = k.gates()["review"]
     assert len(k.runner.started) == 1 and review["state"] == "running"

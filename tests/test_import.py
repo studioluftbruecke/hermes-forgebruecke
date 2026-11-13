@@ -1,4 +1,4 @@
-"""M9: import, push mirror and create_from_template through forgejo_repos."""
+"""Import, push mirror and create_from_template through forgejo_repos."""
 import json
 
 from fb_fakes import BASE, DEMO, make_token, sub
@@ -39,7 +39,7 @@ def test_import_refuses_credentials_in_the_url_and_forgejo_decides_a_foreign_own
     f = forge()
     verdict, out = approved_run(f, {"action": "import", "source": "https://user:pw@github.com/a/b"})
     assert verdict["action"] == "block" and out["error"] == "bad_args"
-    # D27: no plugin rule names owners any more; the card names the owner, and Forgejo refuses what the
+    # No plugin rule names owners any more; the card names the owner, and Forgejo refuses what the
     # agent account may not do
     verdict, out = approved_run(f, {"action": "import", "source": GH, "owner": "acme"})
     assert verdict["action"] == "approve" and "as acme/git-consortium" in verdict["message"]
@@ -89,7 +89,7 @@ def test_create_from_a_repo_that_is_no_template_is_refused():
 
 
 def test_the_schema_offers_every_action_the_tool_handles():
-    """The M9 build first shipped the new actions without them in the schema enum (Hermes refused the call)."""
+    """Every gated action is in the schema enum (without it Hermes refuses the call)."""
     enum = set(repos.SCHEMA["parameters"]["properties"]["action"]["enum"])
     assert enum == set(repos.GATED) | {"overview", "audit"}
 

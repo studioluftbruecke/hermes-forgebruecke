@@ -1,4 +1,4 @@
-"""0.0.22 (experiments/sidebar-rows/PLAN.md, D1 and D5): the sidebar row reads "Forgebrücke · N".
+"""The sidebar row reads "Forgebrücke · N".
 
 The Desktop half registers its row through the shared module (tests/test_sidebar_row.py checks the copy) and
 gives it the count from the desk answer's `counts.waiting`, never from the answer's `label`. So a backend older
@@ -66,11 +66,16 @@ console.info = () => {}
 const mod = await import('./plugin.mjs')
 const plugin = mod.default
 const tick = () => new Promise(r => setTimeout(r, 0))
+// The clock moves a full poll interval before each boot and each fired interval.
+let now = 1800000000000
+Date.now = () => now
 // Desktop's registry: register replaces an entry with the same id; a disposer removes whatever holds its id now.
 function boot(answers, stored) {
   const rows = [], pages = [], palette = [], every = [], store = new Map(stored === undefined ? [] : [['sidebar', stored]])
-  const queue = [...answers]
+  const queue = [...answers], listeners = {}, reads = []
+  now += 60000
   const ctx = {
+    addEventListener: (target, type, fn) => { listeners[type] = fn; return () => {} },
     register(c) {
       const list = c.area === 'sidebar.nav' ? rows : c.area === 'palette' ? palette : []
       const i = list.findIndex(r => r.id === c.id)
@@ -83,6 +88,7 @@ function boot(answers, stored) {
     storage: { get: (k, f) => (store.has(k) ? store.get(k) : f), set: (k, v) => store.set(k, v) },
     rest: async path => {
       if (path !== '/desk') throw new Error('unexpected ' + path)
+      reads.push(path)
       const next = queue.shift()
       if (next instanceof Error) throw next
       return next
@@ -92,7 +98,8 @@ function boot(answers, stored) {
   const view = () => rows.map(r => `${r.id}@${r.order}:${r.data.label}`).join(' ')
   // The first poll runs in register; each later one is the interval Desktop would fire.
   let polls = 0
-  return { ctx, rows, pages, palette, store, view, poll: async () => { if (polls++) every[0](); await tick(); await tick() } }
+  return { ctx, rows, pages, palette, store, view, listeners, reads,
+           poll: async () => { if (polls++) { now += 60000; every[0]() } await tick(); await tick() } }
 }
 const out = await (async () => {
 %s
@@ -220,3 +227,28 @@ def test_the_old_label_plumbing_is_gone_and_the_chat_tab_says_forgebruecke():
     assert "const CHAT_TITLE = 'Forgebrücke'" in SOURCE  # 'Forgejo' stays where it names Forgejo itself
     assert SOURCE.count("Forgejo ·") == 1 and "still answers \"Forgejo · 3\"" in SOURCE  # only the comment on old backends
     assert "startSidebarRow(ctx, { brand: 'Forgebrücke', path: PATH, codicon: 'repo-forked', defaultPosition: 55" in SOURCE
+
+
+@needs_node
+def test_a_hidden_window_reads_nothing_and_showing_it_catches_up(tmp_path):
+    out = run(tmp_path, """
+  const page = { visibilityState: 'hidden', head: { appendChild() {} },
+                 createElement: () => ({ setAttribute() {}, remove() {} }) }
+  globalThis.document = page
+  const b = boot([{ ok: true, counts: { waiting: 4 }, poll_s: 30 }])
+  for (let i = 0; i < 3; i++) await b.poll()
+  const hidden = b.reads.length
+  page.visibilityState = 'visible'
+  b.listeners.visibilitychange()
+  await tick(); await tick()
+  return [hidden, b.reads.length, b.view()]""")
+    assert out == [0, 1, "nav@55:Forgebrücke · 4"]
+
+
+@needs_node
+def test_the_count_polls_no_faster_than_the_backends_interval(tmp_path):
+    out = run(tmp_path, """
+  const b = boot([{ ok: true, counts: { waiting: 1 }, poll_s: 300 }, { ok: true, counts: { waiting: 2 }, poll_s: 300 }])
+  for (let i = 0; i < 6; i++) await b.poll()
+  return b.reads.length""")
+    assert out == 2  # six polls a minute apart read the desk at 0 s and at 300 s

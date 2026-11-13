@@ -1,4 +1,4 @@
-"""The parking store and the wake rule (PLAN-v0.0.21-park.md PK1, § 3 rule 6, § 4)."""
+"""The parking store and the wake rule."""
 import json
 import os
 import time
@@ -207,7 +207,7 @@ def test_seen_of_a_row_is_its_fingerprint():
     assert parking.seen_of({"draft": "yes"}) == {"head_sha": "", "comment_at": None, "draft": None}
 
 
-# Which comment wakes: _last_comment's second value (L14, provisional).
+# Which comment wakes: _last_comment's second value.
 
 class Answer:
     def __init__(self, data, total):

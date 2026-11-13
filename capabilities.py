@@ -3,7 +3,7 @@
 One source of truth for the doctor, the tools' refusals, the settings page and the desk:
 
 - ``TOKENS``: the two key fields: the token of Hermes' account (required) and the optional write token of
-  the user's own account (only the desk's Merge button, on his click).
+  the user's own account (only the desk's Merge and Comment buttons, on the user's click).
 - ``CAPS``: the capabilities a token can give (``read:repos``, ``admin:repo``, ``owner:merge``,
   ``notifications``, ``mark_read``, ``write:agent``), each with the token and the scopes that give it.
   Repo access itself is not a token matter: it is the Forgejo access of Hermes' account on each repo,
@@ -27,10 +27,10 @@ YES, NO = "yes", "no"
 AGENT, OWNER = "bot", "owner"
 BOT_SCOPES = ("read:notification", "write:issue", "write:repository", "read:user")
 OWNER_SCOPES = ("write:repository", "read:user")  # required: token_verdict checks these
-# The recommended mint adds write:issue for "Comment as you" (D-50); a token without it keeps Merge.
+# The recommended mint adds write:issue for "Comment as you"; a token without it keeps Merge.
 OWNER_MINT = OWNER_SCOPES + ("write:issue",)
-# His words for the write token (0.0.19 review, rule 2 on the settings page). desktop/plugin.js rule 2 ends with
-# the same clause; tests/test_v0021_copy.py holds them equal.
+# The risk of the write token, as the settings page states it. desktop/plugin.js ends its rule on the write token
+# with the same clause, and a test holds the two equal.
 OWNER_RISK = "It is also exposed to Hermes, ultimately giving Hermes full access to your account."
 
 # The two key fields, one row each. plugin.yaml's config_schema carries the same label and env

@@ -45,7 +45,7 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 const ID = 'forgebruecke'
 // The same string as plugin.yaml (tests/test_settings.py holds them equal). The routes answer Hermes' version,
 // so the pages can say when this half is older or newer.
-export const VERSION = '0.0.24'
+export const VERSION = '0.0.25'
 const PATH = '/forgebruecke'
 const TAG = '[' + ID + ']'
 const NAV_POLL_MS = 60000
@@ -347,8 +347,8 @@ function useSaveSetting() {
 
 // ── small pieces ─────────────────────────────────────────────────────────────────────────────────
 
-// The decided mark H1-1 (BRAND.md): staff, two branches, the wings and two rings, in one colour so it follows
-// the theme. Geometry from the brand's small-size asset (forgebruecke-mark-mono.svg).
+// The mark: staff, two branches, the wings and two rings, in one colour so it follows
+// the theme. The geometry is the brand's small-size mark.
 const MARK_LINES = 'M32 16 L32 56 M32 50 C12 46 12 37 32 33 C52 29 52 20 32 16 M32 50 C52 46 52 37 32 33 C12 29 12 20 32 16'
 const WING = 'M0 0 C8 0 16 -2 22 -8 M-1 5 C6 5 12 4 17 0 M-2 10 C4 10 8 9 12 6'
 
@@ -376,8 +376,13 @@ function VersionNote({ version }) {
       el('code', null, 'hermes plugins update ' + ID)))
 }
 
+// Every address here comes from Forgejo or the user's own setting; only http(s) ever leaves the page.
+export function isWebAddress(href) {
+  return typeof href === 'string' && /^https?:\/\/[^\s]+$/i.test(href)
+}
+
 function openExternal(href) {
-  if (!href) return
+  if (!isWebAddress(href)) return
   const os = pluginCtx && pluginCtx.os
   Promise.resolve(os && typeof os.openExternal === 'function' ? os.openExternal(href) : false)
     .then(ok => {
@@ -637,7 +642,7 @@ function Row({ row, onMerge, canMerge, onPark, you, canComment }) {
     commenting ? el(CommentBox, { row, you, onClose: () => setCommenting(false) }) : null)
 }
 
-// ── the parking area (0.0.21, PLAN-v0.0.21-park.md § 7) ─────────────────────────────────────────
+// ── the parking area ─────────────────────────────────────────────────────────────────────────────
 
 export const PARK = {
   park: 'Park',
@@ -749,7 +754,7 @@ function ParkDialog({ row, you, canComment, onClose }) {
   const { park } = useParking()
   useEffect(() => {
     // The dialog focuses its confirm button on open. This effect runs after the dialog's (a parent's effects
-    // follow its children's), and the tick keeps the note focused if Radix ever focuses later (Q-PK3).
+    // follow its children's), and the tick keeps the note focused if Radix ever focuses later.
     const timer = window.setTimeout(() => noteRef.current && noteRef.current.focus(), 0)
     return () => window.clearTimeout(timer)
   }, [])
@@ -960,7 +965,7 @@ function RowList({ rows, tab, setTab, onMerge, note, blocked, canMerge, onPark, 
   return el('div', { style: S.col(10) }, top, filters, ...mine.map(r => el(Row, { key: r.id, canComment, canMerge, onMerge, onPark, row: r, you })), area)
 }
 
-// ── the Repos tab (feedback 2026-11-12, FB-3): list or grid, open pull requests that expand, actions per repo ──
+// ── the Repos tab: list or grid, open pull requests that expand, actions per repo ──
 
 export const LAYOUTS = ['list', 'grid']
 const LAYOUT_KEY = profile => 'forgebruecke:repos-layout:' + (profile || 'default')
@@ -1520,11 +1525,14 @@ function HowItWorks({ s, startOpen }) {
       : null)
 }
 
+// The copy takes the profile's .env with every key, so the button only opens a confirm that says so (the
+// backend's sentence); the route refuses without `confirm: true`.
 function AgentReviews({ s }) {
   const [answer, setAnswer] = useState(null)
+  const [asking, setAsking] = useState(false)
   const create = async () => {
     try {
-      setAnswer(await rest('/reviewer-profile', { method: 'POST', body: {} }))
+      setAnswer(await rest('/reviewer-profile', { method: 'POST', body: { confirm: true } }))
     } catch (error) {
       setAnswer({ ok: false, message: error.message })
     }
@@ -1532,12 +1540,22 @@ function AgentReviews({ s }) {
   return el('section', { style: S.col(6), 'data-test': 'reviews' },
     el('div', { style: { ...S.row(8), ...S.text } },
       el('span', {}, 'Agent reviews run in profile ', el('span', { style: { ...S.mono, color: T.primary } }, s.default_review_profile || 'this one'), '.'),
-      s.reviewer && !s.reviewer.exists ? el(Button, { onClick: create, size: 'xs', variant: 'secondary' }, 'Create a reviewer profile') : null),
+      s.reviewer && !s.reviewer.exists ? el(Button, { onClick: () => setAsking(true), size: 'xs', variant: 'secondary' }, 'Create a reviewer profile') : null),
+    asking ? el(ConfirmDialog, {
+      confirmLabel: 'Copy the profile',
+      busyLabel: 'Copying',
+      description: s.reviewer.copies,
+      dismissOnConfirm: true,
+      onClose: () => setAsking(false),
+      onConfirm: create,
+      open: true,
+      title: 'Create ' + s.reviewer.name + '?'
+    }) : null,
     answer ? el('div', { style: { ...S.text, color: answer.ok ? T.green : T.yellow } }, answer.message, answer.command ? el('div', { style: { ...S.mono, color: T.primary, whiteSpace: 'pre-wrap' }, 'data-test': 'reviewer-command' }, answer.command) : null) : null)
 }
 
-// A token saved after this profile's plugin host started is unseen until the host restarts (the backend
-// reads the .env's time against its own start). One click restarts it; Hermes starts a new one at once.
+// A token saved after this profile's plugin host started is unseen by the page's routes (the backend reads
+// the .env's time against its own start and the last reload). One click reads Forgebrücke's tokens again.
 function Reload({ reload, onDone }) {
   const [busy, setBusy] = useState(false)
   if (!reload || !reload.needed) return null
@@ -1545,8 +1563,7 @@ function Reload({ reload, onDone }) {
     setBusy(true)
     try {
       const out = await rest('/reload-tokens', { method: 'POST', body: {} })
-      host.notify({ kind: 'success', message: (out && out.message) || 'Reloading.' })
-      await sleep(2000)
+      host.notify({ kind: 'success', message: (out && out.message) || 'Tokens loaded.' })
       await onDone()
     } catch (error) {
       host.notify({ kind: 'error', message: 'Not reloaded: ' + error.message })
@@ -1609,9 +1626,24 @@ function SettingsPage() {
 
 // ── registration ─────────────────────────────────────────────────────────────────────────────────
 
+// A poll is due when Desktop is visible and NAV_POLL_MS or the backend's own poll interval (`poll_s` on /desk),
+// whichever is longer, has passed since the last one. A hidden window reads nothing; showing it catches up.
+export function navPollDue(lastMs, nowMs, hidden, pollS) {
+  if (hidden) return false
+  return nowMs - lastMs >= Math.max(NAV_POLL_MS, (Number(pollS) || 0) * 1000)
+}
+
+let navLast = 0
+let navPollS = null
+
 async function pollNav() {
+  const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden'
+  if (!navPollDue(navLast, Date.now(), hidden, navPollS)) return
+  navLast = Date.now()
   try {
-    showCount(await rest('/desk'))
+    const desk = await rest('/desk')
+    navPollS = desk && desk.poll_s ? desk.poll_s : navPollS
+    showCount(desk)
   } catch {
     /* the row keeps its last label; the page shows the error */
   }
@@ -1643,9 +1675,11 @@ export default {
     if (typeof ctx.registerSettingsPage === 'function') {
       ctx.registerSettingsPage({ id: 'setup', title: 'Forgebrücke', icon: 'repo-forked', order: 50, render: () => jsx(SettingsPage, {}) })
     }
-    const every = typeof ctx.setInterval === 'function' ? ctx.setInterval : null
     pollNav()
-    if (every) every(pollNav, NAV_POLL_MS)
+    if (typeof ctx.setInterval === 'function') ctx.setInterval(pollNav, NAV_POLL_MS / 4)
+    if (typeof ctx.addEventListener === 'function' && typeof document !== 'undefined') {
+      ctx.addEventListener(document, 'visibilitychange', pollNav)
+    }
     log('registered', { path: PATH })
   }
 }

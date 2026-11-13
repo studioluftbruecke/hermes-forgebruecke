@@ -1,5 +1,5 @@
-"""The parking area's Desktop half (PLAN-v0.0.21-park.md PK6, § 3 rule 5, § 7): no new SDK import, the routes it
-calls, every string of § 7 within the copy budget, inputs in the park dialog that pass only Enter, and the
+"""The parking area's Desktop half: no new SDK import, the routes it
+calls, every string within the copy budget, inputs in the park dialog that pass only Enter, and the
 desk answer it shows before the refetch."""
 import json
 import re

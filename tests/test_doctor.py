@@ -36,7 +36,7 @@ def test_bot_only_setup_names_identity_scopes_and_dark_features():
                                    "note": "Optional. Only for the desk's Merge and Comment buttons."}
     assert len(report["tokens"]) == 2
     assert feature(report, "protection_view")["status"] == "dark"
-    assert feature(report, "mentions")["status"] == "available"  # on by default (D31), no rule needed
+    assert feature(report, "mentions")["status"] == "available"  # on by default, no rule needed
     assert feature(report, "writes")["status"] == "off"  # dry_run
     assert feature(report, "mark_read")["status"] == "dark"
     assert feature(report, "flows")["status"] == "off"  # capable, but no rule lists a flow
@@ -147,7 +147,7 @@ def test_register_wires_the_tool_the_cli_and_the_state(tmp_path):
                               "forgejo_create_pr", "forgejo_status", "forgejo_flows", "forgejo_repos"}
     assert set(ctx.cli) == {"forgebruecke"} and set(ctx.hooks) == {"pre_tool_call", "post_approval_response",
                                                                          "transform_llm_output"}
-    assert len(ctx.hooks["pre_tool_call"]) == 2  # the write gate and the guardrail guard
+    assert len(ctx.hooks["pre_tool_call"]) == 3  # the write gate, the guardrail guard and the review lockdown
     channel = ctx.platforms["forgebruecke"]
     assert channel["display_tier"] == "minimal" and channel["required_env"] == ["FORGEBRUECKE_BOT_ACCOUNT_TOKEN"]
     assert "only write" in channel["platform_hint"]

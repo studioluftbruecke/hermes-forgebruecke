@@ -164,7 +164,7 @@ def test_my_flow_row_has_the_merge_as_its_main_button(tmp_path):
 
 
 def test_a_review_row_keeps_review_as_its_main_button_also_with_a_write_token(tmp_path):
-    """R149-1 a): a row that asks for his review keeps Review in Forgejo as its main button; Merge shows
+    """A row that asks for the user's review keeps Review in Forgejo as its main button; Merge shows
     (can_merge) and sits above it in the stack. Rows without a request keep Merge as the main button."""
     row = read(tmp_path / "a", forge(), tokens=BOTH)["rows"][0]
     assert row["summary"]["text"] == "Waiting for your review."
@@ -186,7 +186,7 @@ def test_no_merge_button_on_a_pull_request_forgejo_will_not_merge(tmp_path):
 
 
 def test_on_a_review_row_merge_sits_above_a_filled_review_button():
-    """R149-1 a): the stack draws Merge first, then the backend's move; that move is the filled (default)
+    """The stack draws Merge first, then the backend's move; that move is the filled (default)
     button unless it is Open in Forgejo, also when Merge shows above it."""
     actions = SOURCE[SOURCE.index("function RowActions("):SOURCE.index("function Row(")]
     link = actions[actions.index("  const link = "):actions.index("  return el('div'")]
@@ -211,7 +211,7 @@ def test_the_row_draws_the_backends_move_and_merge_is_first_when_his_token_can_m
     assert "MOVE[row.next]" in link and "row.tab" not in link and "row.flow" not in row
     assert "const merge = row.can_merge || row.next === 'merge'" in row
     stack = row[row.index("'data-test': 'actions' },"):]
-    assert stack.index("    merge,") < stack.index("link && why")  # FB-2: Merge on top of the stack
+    assert stack.index("    merge,") < stack.index("link && why")  # Merge on top of the stack
 
 
 # --- what could not be read -------------------------------------------------------------------------
@@ -360,20 +360,20 @@ def test_an_hour_of_polls_probes_the_tokens_once(tmp_path, you):
         assert body["waiting_note"]["suggestion"] == "acme" and body["waiting_note"]["source"] == "write_token"
 
 
-def test_a_new_write_token_and_a_click_on_refresh_are_probed_again(tmp_path):
+def test_a_new_write_token_is_probed_again_and_a_click_on_refresh_is_not(tmp_path):
     f, clock = forge(), Clock()
     read(tmp_path, f, tokens=BOTH, now=clock)
     first = len([c for c in f.calls if c[0] != "GET"])
     clock.t += 60
     read(tmp_path, f, tokens=BOTH, now=clock, refresh=True)
-    assert len([c for c in f.calls if c[0] != "GET"]) == 2 * first
+    assert len([c for c in f.calls if c[0] != "GET"]) == first
     clock.t += 60
     other = make_token("other")
     f.accounts[other] = f.accounts[OWNER]
     values = {"url": BASE, "dry_run": False, "you": "acme"}
     secrets = {"FORGEBRUECKE_BOT_ACCOUNT_TOKEN": BOT, "FORGEBRUECKE_PERSONAL_WRITE_TOKEN": other}
     desk.api_desk(lambda k, d=None: values.get(k, d), secrets.get, data_dir=tmp_path, transport=f, now=clock)
-    assert len([c for c in f.calls if c[0] != "GET"]) == 3 * first
+    assert len([c for c in f.calls if c[0] != "GET"]) == 2 * first
 
 
 def test_a_check_forgejo_could_not_finish_is_not_remembered(tmp_path):
