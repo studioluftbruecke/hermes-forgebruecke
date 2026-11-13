@@ -6,7 +6,7 @@ account on its own feature branches, and the merge into `main` stays yours.
 
 ![The Forgejo desk in Hermes Desktop](docs/screenshot-1.png)
 
-Version 0.0.23. MIT. A Studio Luftbrücke Hermes plugin.
+Version 0.0.24. MIT. A Studio Luftbrücke Hermes plugin.
 
 ## What it does
 
@@ -142,8 +142,8 @@ Optional:
   untrusted input.
 - **Background processes.** A flow's review gate starts `hermes -p <profile> chat --query-file …`,
   at most two at once. Each gets a minimal environment, no Forgejo access, and writes a verdict file.
-- **The desk.** The page calls only this plugin's routes on your Hermes backend. `/merge` merges with
-  your write token, pinned to the commit the desk showed; `/comment` posts your words as you.
+- **The desk.** The page calls only this plugin's routes on your Hermes backend. Your write token merges
+  (`/merge`, pinned to the shown commit) and reads your merge rights (`/desk`, `/repo-pulls`). `/comment` posts your words as you.
   `/park` and `/unpark` write only `parked.json`. `/setting` saves `you` and the four
   switches. "Create a reviewer profile" runs `hermes profile create`, then
   `hermes config unset` for both tokens. `/reload-tokens` restarts the plugin host to read a new

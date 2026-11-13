@@ -7,8 +7,8 @@ import types
 
 import pytest
 
-from fb_fakes import (BASE, DEMO, HEAD_SHA, FakeForgejo, bot_account, load_plugin, make_token, owner_account,
-                      sample_data, sub)
+from fb_fakes import (BASE, DEMO, HEAD_SHA, FakeForgejo, bot_account, load_plugin, make_token, open_flow_prs,
+                      owner_account, sample_data, sub)
 
 plugin = load_plugin()
 desk = sub("desk")
@@ -99,6 +99,7 @@ def test_desk_rows_counts_checks_and_last_comment(tmp_path):
     f = forge()
     store = store_with(tmp_path, pr_state(3), pr_state(4, ("failed", "pending", "pending")),
                        pr_state(5, ("passed", "passed", "waiting"), merged=True))
+    open_flow_prs(f, *store.all_prs())
     gs, sec = getters(you="acme")
     status, body = desk.api_desk(gs, sec, data_dir=tmp_path, transport=f, now=lambda: 1000)
     assert status == 200 and body["ok"]
@@ -113,7 +114,7 @@ def test_desk_rows_counts_checks_and_last_comment(tmp_path):
     assert first["flow"] == "demo" and first["reason"] is None
     assert body["repos"] == [{"repo": DEMO, "right": "write", "url": f"{BASE}/{DEMO}",
                               "collaboration_url": f"{BASE}/{DEMO}/settings/collaboration", "private": True,
-                              "flows": ["demo"], "mentions": True, "admin": False, "open_rows": 2, "open_prs": 1}]
+                              "flows": ["demo"], "mentions": True, "admin": False, "open_rows": 2, "open_prs": 2}]
     assert not any(w[0] != "GET" for w in f.writes)  # the desk only reads
 
 
@@ -136,7 +137,7 @@ def test_waiting_for_me_lists_prs_that_request_your_review_without_a_flow(tmp_pa
     other = {**f.data[DEMO]["pulls"][3], "number": 8, "title": "Not for you", "requested_reviewers": [{"login": "bob"}]}
     f.data[DEMO]["pulls"][8] = other
     f.data[DEMO]["issues"][8] = {**f.data[DEMO]["issues"][3], "number": 8}
-    store_with(tmp_path, pr_state(4, ("failed", "pending", "pending")))
+    open_flow_prs(f, *store_with(tmp_path, pr_state(4, ("failed", "pending", "pending"))).all_prs())
     gs, sec = getters(you="acme", review_every_pr=False)
     body = desk.api_desk(gs, sec, data_dir=tmp_path, transport=f, now=lambda: 1000)[1]
     waiting = [r for r in body["rows"] if r["tab"] == "waiting"]
@@ -163,7 +164,8 @@ def add_pr(f, n, *, author="hermes", asked=(), title=None):
 
 def test_every_open_pr_that_does_not_ask_you_yet_still_waits_for_you(tmp_path):
     """D33 (default on): #8 was opened without a review request (a raw API call, the web page) and still shows,
-    marked so, without the merge button; #9 is yours and #10 you already reviewed, so neither shows."""
+    marked so, with the Merge button his account may use (FB-1); #9 is yours and #10 you already reviewed,
+    so neither shows."""
     f = forge()
     add_pr(f, 8, asked=("bob",))
     add_pr(f, 9, author="acme")
@@ -174,7 +176,7 @@ def test_every_open_pr_that_does_not_ask_you_yet_still_waits_for_you(tmp_path):
     rows = {r["number"]: r for r in body["rows"]}
     assert sorted(rows) == [3, 8]
     assert rows[3]["reason"] == "review requested" and rows[8]["reason"] == "review not requested yet"
-    assert rows[8]["tab"] == "waiting" and rows[8]["can_merge"] is False
+    assert rows[8]["tab"] == "waiting" and rows[8]["can_merge"] is True and rows[8]["next"] == "merge"
     assert body["counts"]["waiting"] == 2 and body["label"] == "Forgebrücke · 2"
     assert not any(w[0] != "GET" for w in f.writes)  # the desk only reads; the tick asks
 
@@ -279,11 +281,8 @@ def test_merge_a_pr_without_a_flow_that_requests_my_review(tmp_path):
     assert merges(f)[0][2] == {"Do": "merge", "head_commit_id": HEAD_SHA}
 
 
-def test_merge_without_a_flow_refuses_when_my_review_is_not_requested_or_the_head_moved(tmp_path):
+def test_merge_without_a_flow_refuses_when_the_head_moved(tmp_path):
     f = forge()
-    gs, sec = getters(("bot", "owner"), you="someone-else")
-    status, body = desk.api_merge(gs, sec, {"repo": DEMO, "number": 3, "head_sha": HEAD_SHA}, data_dir=tmp_path, transport=f)
-    assert status == 409 and body["error"] == "not_requested"
     gs, sec = getters(("bot", "owner"), you="acme")
     status, body = desk.api_merge(gs, sec, {"repo": DEMO, "number": 3, "head_sha": "b" * 40}, data_dir=tmp_path, transport=f)
     assert status == 409 and body["error"] == "head_moved"

@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from fb_fakes import BASE, DEMO, HEAD_SHA, ROOT, FakeForgejo, bot_account, make_token, owner_account, sample_data, sub
+from fb_fakes import BASE, DEMO, HEAD_SHA, ROOT, FakeForgejo, bot_account, make_token, open_flow_prs, owner_account, sample_data, sub
 
 desk = sub("desk")
 state_mod = sub("flows.state")
@@ -56,6 +56,8 @@ def read(tmp_path, f, *states, tokens=("bot",), now=None, engine_age=None, refre
     for st in states:
         store.save_pr(st)
     clock = now or Clock()
+    if isinstance(f, FakeForgejo):
+        open_flow_prs(f, *store.all_prs())
     if engine_age is not None:
         store.write_engine({"at": clock() - engine_age, "source": "gateway", "errors": []})
     env = {"bot": ("FORGEBRUECKE_BOT_ACCOUNT_TOKEN", BOT), "owner": ("FORGEBRUECKE_PERSONAL_WRITE_TOKEN", OWNER)}
@@ -162,9 +164,11 @@ def test_my_flow_row_has_the_merge_as_its_main_button(tmp_path):
 
 
 def test_a_review_row_keeps_review_as_its_main_button_also_with_a_write_token(tmp_path):
+    """R149-1 a): a row that asks for his review keeps Review in Forgejo as its main button; Merge shows
+    (can_merge) and sits above it in the stack. Rows without a request keep Merge as the main button."""
     row = read(tmp_path / "a", forge(), tokens=BOTH)["rows"][0]
     assert row["summary"]["text"] == "Waiting for your review."
-    assert (row["next"], row["can_merge"]) == ("review_in_forgejo", True)
+    assert (row["reason"], row["next"], row["can_merge"]) == ("review requested", "review_in_forgejo", True)
     row = read(tmp_path / "b", forge())["rows"][0]
     assert (row["next"], row["can_merge"]) == ("review_in_forgejo", False)
 
@@ -178,7 +182,18 @@ def test_no_merge_button_on_a_pull_request_forgejo_will_not_merge(tmp_path):
     assert (row["tab"], row["next"], row["can_merge"]) == ("waiting", "merge_in_forgejo", False)
     f.data[DEMO]["pulls"][3].update(draft=False, mergeable=True)
     row = read(tmp_path / "b", f, tokens=BOTH, refresh=True)["rows"][0]
-    assert (row["next"], row["can_merge"]) == ("merge", True)
+    assert (row["flow"], row["next"], row["can_merge"]) == ("demo", "merge", True)  # #3 runs a flow in "b"
+
+
+def test_on_a_review_row_merge_sits_above_a_filled_review_button():
+    """R149-1 a): the stack draws Merge first, then the backend's move; that move is the filled (default)
+    button unless it is Open in Forgejo, also when Merge shows above it."""
+    actions = SOURCE[SOURCE.index("function RowActions("):SOURCE.index("function Row(")]
+    link = actions[actions.index("  const link = "):actions.index("  return el('div'")]
+    assert "variant: row.next === 'open_in_forgejo' ? 'secondary' : 'default'" in link
+    assert "|| merge" not in link  # Merge above it no longer turns the review button grey
+    stack = actions[actions.index("'data-test': 'actions' },"):]
+    assert stack.index("    merge,") < stack.index("link && why") < stack.index("el(AskHermes")
 
 
 def test_rows_that_are_not_my_move_open_forgejo(tmp_path):
@@ -188,13 +203,15 @@ def test_rows_that_are_not_my_move_open_forgejo(tmp_path):
         3: ("blocked", "open_in_forgejo", False), 4: ("running", "open_in_forgejo", False)}
 
 
-def test_the_row_draws_the_backends_move_and_merge_is_second_on_a_review_row():
+def test_the_row_draws_the_backends_move_and_merge_is_first_when_his_token_can_merge():
     row = SOURCE[SOURCE.index("const MOVE = {"):SOURCE.index("// ── the parking area")]
     moves = SOURCE[SOURCE.index("const MOVE = {"):SOURCE.index("}", SOURCE.index("const MOVE = {"))]
     assert set(re.findall(r"^  (\w+): ", moves, re.M)) == set(desk.MOVES)
-    main = row[row.index("  const main = "):row.index("  const comment = ")]  # the main button: the backend's move only
-    assert "MOVE[row.next]" in main and "row.tab" not in main and "row.flow" not in row
-    assert "row.can_merge && row.next !== 'merge'" in row
+    link = row[row.index("  const link = "):row.index("  return el('div'")]  # the link: the backend's move only
+    assert "MOVE[row.next]" in link and "row.tab" not in link and "row.flow" not in row
+    assert "const merge = row.can_merge || row.next === 'merge'" in row
+    stack = row[row.index("'data-test': 'actions' },"):]
+    assert stack.index("    merge,") < stack.index("link && why")  # FB-2: Merge on top of the stack
 
 
 # --- what could not be read -------------------------------------------------------------------------
@@ -235,7 +252,7 @@ def test_the_empty_repos_tab_opens_forgejo_or_tries_again():
     repos = SOURCE[SOURCE.index("function Repos("):SOURCE.index("function MergeDialog(")]
     assert "openFields" not in repos and "'Open Forgejo'" in repos and "openExternal(forgeUrl)" in repos
     assert "title: error" in repos and "'Try again'" in repos
-    assert "el(Repos, { error: data.repos_error, forgeUrl: data.forge_url, onRetry: refresh, repos })" in SOURCE
+    assert "el(Repos, { error: data.repos_error, forgeUrl: data.forge_url, onMerge: setMerging, onRetry: refresh, repos," in SOURCE
 
 
 # --- the state sentence -----------------------------------------------------------------------------

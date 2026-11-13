@@ -2,7 +2,7 @@
 import argparse
 import json
 
-from fb_fakes import BASE, DEMO, HEAD_SHA, DictState, sub
+from fb_fakes import BASE, DEMO, HEAD_SHA, DictState, open_flow_prs, sub
 from fb_fakes_tools_read import kit, mention, plugin
 
 read_mod, state_mod = sub("tools.read"), sub("flows.state")
@@ -21,6 +21,7 @@ def desk(tmp_path, settings=None, lane=None, data_dir=True):
     store.save_pr(flow_pr(7, "passed", "running", "pending"))
     store.save_pr(flow_pr(8, "failed", "pending", "pending"))
     forge, gs, sec = kit(settings={"you": "acme", **(settings or {})})
+    open_flow_prs(forge, *store.all_prs())
     handler = plugin.make_read_handler("forge_list", gs, sec, transport=forge,
                                        lane_fn=(lambda: lane) if lane else None,
                                        data_dir=tmp_path if data_dir else None)
@@ -68,6 +69,7 @@ def cli(tmp_path, capsys, **args):
     store = state_mod.FlowStore(tmp_path)
     store.save_pr(flow_pr(7, "passed", "running", "pending"))
     forge, gs, sec = kit(settings={"you": "acme"})
+    open_flow_prs(forge, *store.all_prs())
     handler = plugin.make_cli_handler(gs, sec, state=DictState(tmp_path), transport=forge, **args.pop("factory", {}))
     code = handler(argparse.Namespace(forgebruecke_command="desk", **{"json": False, **args}))
     return code, capsys.readouterr().out

@@ -3,6 +3,8 @@
     GET  /desk[?refresh=true]         rows (one per open PR with a flow), counts, repo cards; 15 s cache
     GET  /settings[?refresh=true]     the two key fields (set or not, whose account, scopes), the
                                       capability registry's features, the setups, the profiles; 60 s cache
+    GET  /repo-pulls?repo=owner/name  one repo's open pull requests (checks, Merge by the desk's rule) and its
+                                      default branch's latest commit, for the Repos tab on expand; 15 s cache
     POST /merge                       {repo, number, head_sha}: the merge button, with the write token of
                                       your account, only when the registry says it can merge
     POST /setting                     {key, value}: the settings page's switches and "Use this login". Saves
@@ -111,6 +113,11 @@ def desk(refresh: bool = Query(False)) -> JSONResponse:
 @router.get("/settings")
 def settings(refresh: bool = Query(False)) -> JSONResponse:
     return _reply(_desk().api_settings(_get_setting, _get_secret, refresh=refresh, home=_home(), data_dir=_data_dir()))
+
+
+@router.get("/repo-pulls")
+def repo_pulls(repo: str = Query(""), refresh: bool = Query(False)) -> JSONResponse:
+    return _reply(_desk().api_repo_pulls(_get_setting, _get_secret, repo, data_dir=_data_dir(), refresh=refresh))
 
 
 @router.post("/merge")

@@ -196,7 +196,7 @@ def test_a_parked_row_outside_waiting_stays_in_its_tab(tmp_path):
     store.save_pr({"repo": DEMO, "pr": 42, "flow": "demo", "head_sha": HEAD_SHA, "title": "Flow PR", "url": "u",
                    "gates": [{"gate_key": "review", "type": "review", "state": "running", "detail": ""}]})
     park(tmp_path, 42)
-    row = by_id(build(tmp_path, forge()))[42]
+    row = by_id(build(tmp_path, forge(42)))[42]
     assert row["tab"] == "running" and row["section"] == "now" and row["parked"] is None
 
 

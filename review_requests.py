@@ -38,9 +38,10 @@ def _mod(name: str):
     return importlib.import_module(f"{__package__}.{name}")
 
 
-def open_pulls(client: Any) -> "tuple[dict, list]":
+def open_pulls(client: Any, *, limit: int = 1) -> "tuple[dict, list]":
     """``({repo: [pull, ...]}, notes)`` for every repo with an open pull request the account sees: one issue
-    search, then one pulls list per repo (the search's items carry no reviewers; measured on Forgejo 15)."""
+    search, then one pulls list per repo (the search's items carry no reviewers; measured on Forgejo 15).
+    ``limit`` lists run at once: the desk overlaps them, the tick keeps one so a 429 ends it at that request."""
     ForgejoError = _mod("client").ForgejoError
     found = client.paginate("/repos/issues/search", {"type": "pulls", "state": "open"}, max_items=MAX_SEARCH)
     repos: list = []
@@ -54,15 +55,21 @@ def open_pulls(client: Any) -> "tuple[dict, list]":
     if len(repos) > MAX_REPOS:
         notes.append(f"Review requests were checked in {MAX_REPOS} of {len(repos)} repos with open pull requests.")
         repos = repos[:MAX_REPOS]
-    out: dict = {}
-    for repo in repos:
+
+    def read(repo: str) -> "tuple[Any, str]":
         try:
             page = client.paginate(f"/repos/{repo}/pulls", {"state": "open"}, max_items=100)
-            out[repo] = page.items
-            if page.has_more:  # an incomplete scan: the desk never prunes parked rows on it
-                notes.append(f"{repo}: only its 100 most recent open pull requests were read.")
         except ForgejoError as e:
-            notes.append(f"{repo}: its open pull requests could not be read ({e.message})")
+            return None, f"{repo}: its open pull requests could not be read ({e.message})"
+        # an incomplete scan: the desk never prunes parked rows on it
+        return page.items, f"{repo}: only its 100 most recent open pull requests were read." if page.has_more else ""
+
+    out: dict = {}
+    for repo, (items, note) in zip(repos, _mod("client").parallel_map(read, repos, limit)):
+        if items is not None:
+            out[repo] = items
+        if note:
+            notes.append(note)
     return out, notes
 
 

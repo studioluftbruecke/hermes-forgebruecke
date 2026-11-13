@@ -83,7 +83,7 @@ def test_a_row_without_merge_says_why():
     assert out.returncode == 0, out.stderr
     assert json.loads(out.stdout) == ["A draft. Forgejo merges it once it is marked ready.", "Forgejo cannot merge it yet.",
                                       None, None, None, None]
-    assert "why ? el(Tip, { label: why }, main) : main" in part("function Row(", "const EMPTY")
+    assert "link && why ? el(Tip, { label: why }, link) : link" in part("function RowActions(", "const EMPTY")
 
 
 def test_the_settings_page_shows_a_stopped_background_an_unprotected_main_and_a_token_to_reload():

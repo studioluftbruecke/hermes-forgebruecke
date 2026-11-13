@@ -45,7 +45,7 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 const ID = 'forgebruecke'
 // The same string as plugin.yaml (tests/test_settings.py holds them equal). The routes answer Hermes' version,
 // so the pages can say when this half is older or newer.
-export const VERSION = '0.0.23'
+export const VERSION = '0.0.24'
 const PATH = '/forgebruecke'
 const TAG = '[' + ID + ']'
 const NAV_POLL_MS = 60000
@@ -105,7 +105,11 @@ const SHEET = [
   '.fb-link{background:transparent;border:0;color:inherit;cursor:pointer;font:inherit;padding:0;text-align:left}',
   '.fb-link:hover{text-decoration:underline}',
   '.fb-repo{border-radius:6px}',
-  '.fb-repo:hover{background:' + T.fill + '}'
+  '.fb-repo:hover{background:' + T.fill + '}',
+  // Merge in the theme's green, darkened so white text stays readable in light and dark. The dialog's confirm
+  // button takes no class, so the dialog is found by the marker its content carries.
+  '.fb-merge,[role=dialog]:has(.fb-merge-dialog) button[data-variant=default]{background:color-mix(in srgb,' + T.green + ' 78%,black);color:white}',
+  '.fb-merge:hover,[role=dialog]:has(.fb-merge-dialog) button[data-variant=default]:hover{background:color-mix(in srgb,' + T.green + ' 66%,black)}'
 ].join('\n')
 
 // The desk answer's label after a park, before the refetch: the backend's rule (desk.nav_label). The sidebar row
@@ -488,13 +492,24 @@ const QUESTIONS = [
   ['Fix what the review asked for.', row => row.tab === 'blocked' || (row.summary && row.summary.tone === 'bad')]
 ]
 
+export const ASK_OWN = 'Ask something else…'
+
+// The chat draft: the PR reference, a space, then the question. Without one, the caret waits after the space.
+export function askDraft(row, sentence) {
+  return '@forgejo:' + row.repo + '#' + row.number + ' ' + (sentence || '')
+}
+
+// A menu separator drawn like Desktop's (dropdown-menu.tsx), without a new SDK import, so Desktop 0.23.0 still loads it.
+const MenuLine = () => el('div', { role: 'separator', 'aria-orientation': 'horizontal', style: { height: 1, margin: '4px -4px', background: T.strokeSoft } })
+
 function AskHermes({ row }) {
-  const ask = sentence => openChat('@forgejo:' + row.repo + '#' + row.number + ' ' + sentence)
   return el(DropdownMenu, {},
     el(DropdownMenuTrigger, { asChild: true },
-      el(Button, { size: 'xs', variant: 'secondary', 'data-test': 'ask' }, el(Codicon, { name: 'comment-discussion', size: '0.75rem' }), 'Ask Hermes', el(Codicon, { name: 'chevron-down', size: '0.625rem' }))),
+      el(Button, { size: 'xs', variant: 'secondary', style: { width: '100%' }, 'data-test': 'ask' }, el(Codicon, { name: 'comment-discussion', size: '0.75rem' }), 'Ask Hermes', el(Codicon, { name: 'chevron-down', size: '0.625rem' }))),
     el(DropdownMenuContent, { align: 'end' },
-      ...QUESTIONS.filter(([, when]) => when(row)).map(([sentence]) => el(DropdownMenuItem, { key: sentence, onSelect: () => ask(sentence) }, sentence))))
+      ...QUESTIONS.filter(([, when]) => when(row)).map(([sentence]) => el(DropdownMenuItem, { key: sentence, onSelect: () => openChat(askDraft(row, sentence)) }, sentence)),
+      el(MenuLine, { key: 'sep' }),
+      el(DropdownMenuItem, { key: 'own', onSelect: () => openChat(askDraft(row)), 'data-test': 'ask-own' }, ASK_OWN)))
 }
 
 // ── rows ─────────────────────────────────────────────────────────────────────────────────────────
@@ -573,43 +588,52 @@ export function noMergeReason(row, canMerge) {
   return null
 }
 
+// The row's actions, stacked in one narrow column at its right: Merge first, then the link, Ask Hermes, Park, Comment.
+function RowActions({ row, onMerge, why, onPark, you, canComment, onComment }) {
+  const full = { width: '100%' }
+  const merge = row.can_merge || row.next === 'merge'
+    ? el(Button, { className: 'fb-merge', onClick: () => onMerge(row), size: 'xs', style: full, 'data-test': 'merge' }, el(Codicon, { name: 'git-merge', size: '0.75rem' }), MOVE.merge)
+    : null
+  const link = row.next === 'merge' ? null
+    : el(Button, { disabled: !row.url, onClick: () => openExternal(row.url), size: 'xs', style: full, variant: row.next === 'open_in_forgejo' ? 'secondary' : 'default', 'data-test': 'open', 'data-why': why || undefined }, el(Codicon, { name: 'link-external', size: '0.75rem' }), MOVE[row.next] || MOVE.open_in_forgejo)
+  return el('div', { style: { ...S.col(4), alignItems: 'stretch', flex: 'none', width: '9.5rem' }, 'data-test': 'actions' },
+    merge,
+    link && why ? el(Tip, { label: why }, link) : link,
+    el(AskHermes, { row }),
+    onPark && row.tab === 'waiting'
+      ? el(Button, { onClick: () => onPark(row), size: 'xs', style: full, variant: 'ghost', 'data-test': 'park' }, el(Codicon, { name: 'archive', size: '0.75rem' }), row.back ? PARK.again : PARK.park)
+      : null,
+    canComment && you && row.tab === 'waiting'
+      ? el(Tip, { label: PARK.commentTip(you) },
+        el(Button, { onClick: onComment, size: 'xs', style: full, variant: 'ghost', 'data-test': 'comment-icon' }, el(Codicon, { name: 'comment', size: '0.75rem' }), PARK.comment))
+      : null)
+}
+
 function Row({ row, onMerge, canMerge, onPark, you, canComment }) {
   const [commenting, setCommenting] = useState(false)
   const tone = TONE[(row.summary && row.summary.tone) || 'wait'] || TONE.wait
   const meta = row.repo + (row.author ? ' by ' + row.author : '') + (row.age_s != null ? ' · ' + ago(row.age_s) : '')
-  const why = noMergeReason(row, canMerge)
-  const main = row.next === 'merge' ? el(Button, { onClick: () => onMerge(row), size: 'xs', 'data-test': 'merge' }, el(Codicon, { name: 'git-merge', size: '0.75rem' }), MOVE.merge)
-    : el(Button, { disabled: !row.url, onClick: () => openExternal(row.url), size: 'xs', variant: row.next === 'open_in_forgejo' ? 'secondary' : 'default', 'data-test': 'open', 'data-why': why || undefined }, el(Codicon, { name: 'link-external', size: '0.75rem' }), MOVE[row.next] || MOVE.open_in_forgejo)
   const comment = row.last_comment
   return el('div', { style: S.card, 'data-test': 'row', 'data-tab': row.tab },
-    el('div', { style: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 } },
-      el('div', { style: { ...S.col(2), minWidth: 0 } },
-        el('button', { className: 'fb-link text-sm font-medium', onClick: () => openExternal(row.url), style: { color: T.primary }, title: 'Open in Forgejo', type: 'button' }, '#' + row.number + ' ' + row.title),
-        el('div', { style: S.small, title: row.head_sha ? 'Commit ' + row.head_sha.slice(0, 12) : undefined }, meta)),
-      el('div', { style: { ...S.line(6), flex: 'none' } },
-        canComment && you && row.tab === 'waiting'
-          ? el(Tip, { label: PARK.commentTip(you) },
-            el(Button, { 'aria-label': PARK.commentTip(you), onClick: () => setCommenting(!commenting), size: 'xs', variant: 'ghost', 'data-test': 'comment-icon' }, el(Codicon, { name: 'comment', size: '0.8rem' })))
+    el('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 12 } },
+      el('div', { style: { ...S.col(8), flex: 1, minWidth: 0 } },
+        el('div', { style: S.col(2) },
+          el('button', { className: 'fb-link text-sm font-medium', onClick: () => openExternal(row.url), style: { color: T.primary }, title: 'Open in Forgejo', type: 'button' }, '#' + row.number + ' ' + row.title),
+          el('div', { style: S.small, title: row.head_sha ? 'Commit ' + row.head_sha.slice(0, 12) : undefined }, meta)),
+        row.back ? el(BackLine, { row }) : null,
+        row.summary
+          ? el('div', { style: { ...S.line(6), fontSize: '0.75rem', color: T.primary, alignItems: 'flex-start' }, 'data-test': 'summary', 'data-tone': row.summary.tone },
+            el(Codicon, { name: tone.icon, size: '0.85rem', spinning: tone.spin, style: { color: tone.color, marginTop: 1 } }),
+            el('span', {}, row.summary.text))
           : null,
-        el(AskHermes, { row }),
-        onPark && row.tab === 'waiting'
-          ? el(Button, { onClick: () => onPark(row), size: 'xs', variant: 'ghost', 'data-test': 'park' }, el(Codicon, { name: 'archive', size: '0.75rem' }), row.back ? PARK.again : PARK.park)
-          : null,
-        row.can_merge && row.next !== 'merge' ? el(Button, { onClick: () => onMerge(row), size: 'xs', variant: 'secondary', 'data-test': 'merge' }, el(Codicon, { name: 'git-merge', size: '0.75rem' }), MOVE.merge) : null,
-        why ? el(Tip, { label: why }, main) : main)),
-    row.back ? el(BackLine, { row }) : null,
-    row.summary
-      ? el('div', { style: { ...S.line(6), fontSize: '0.75rem', color: T.primary, alignItems: 'flex-start' }, 'data-test': 'summary', 'data-tone': row.summary.tone },
-        el(Codicon, { name: tone.icon, size: '0.85rem', spinning: tone.spin, style: { color: tone.color, marginTop: 1 } }),
-        el('span', {}, row.summary.text))
-      : null,
-    row.gates && row.gates.length ? el(GateChain, { gates: row.gates, yours: Boolean(row.summary && row.summary.tone === 'ok') }) : null,
-    row.review_summary ? el('div', { style: S.small, 'data-test': 'review-summary' }, row.review_summary) : null,
-    el(Checks, { checks: row.checks, said: row.summary && row.summary.text }),
-    comment
-      ? el('div', { style: { ...S.small, borderLeft: '2px solid ' + T.strokeSoft, paddingLeft: 8 }, 'data-test': 'comment' },
-        el('span', { style: { color: T.primary } }, (comment.author || 'Someone') + (comment.age_s != null ? ', ' + ago(comment.age_s) : '') + ': '), comment.body)
-      : null,
+        row.gates && row.gates.length ? el(GateChain, { gates: row.gates, yours: Boolean(row.summary && row.summary.tone === 'ok') }) : null,
+        row.review_summary ? el('div', { style: S.small, 'data-test': 'review-summary' }, row.review_summary) : null,
+        el(Checks, { checks: row.checks, said: row.summary && row.summary.text }),
+        comment
+          ? el('div', { style: { ...S.small, borderLeft: '2px solid ' + T.strokeSoft, paddingLeft: 8 }, 'data-test': 'comment' },
+            el('span', { style: { color: T.primary } }, (comment.author || 'Someone') + (comment.age_s != null ? ', ' + ago(comment.age_s) : '') + ': '), comment.body)
+          : null),
+      el(RowActions, { canComment, onComment: () => setCommenting(!commenting), onMerge, onPark, row, why: noMergeReason(row, canMerge), you })),
     commenting ? el(CommentBox, { row, you, onClose: () => setCommenting(false) }) : null)
 }
 
@@ -635,6 +659,7 @@ export const PARK = {
   yourNote: note => 'Your note: ' + note,
   whatChanged: 'What changed',
   commentTip: you => 'Comment as @' + you,
+  comment: 'Comment',
   commentPlaceholder: 'Write a comment. Markdown works.',
   postAs: you => 'Post as @' + you,
   cancel: 'Cancel',
@@ -665,6 +690,16 @@ export function withParked(data, id, parked) {
   const waiting = rows.filter(r => r.tab === 'waiting' && r.section !== 'parked').length
   const counts = { ...(data.counts || {}), waiting, parked: rows.filter(r => r.section === 'parked').length }
   return { ...data, rows, counts, label: formatNavLabel(waiting) }
+}
+
+// The desk answer right after a merge, before the refetch: the merged row leaves, the counts and the label follow.
+export function withoutRow(data, id) {
+  if (!data || !data.rows || !data.rows.some(r => r.id === id)) return data
+  const rows = data.rows.filter(r => r.id !== id)
+  const counts = { ...(data.counts || {}) }
+  for (const tab of ['waiting', 'running', 'blocked']) counts[tab] = rows.filter(r => r.tab === tab && r.section !== 'parked').length
+  counts.parked = rows.filter(r => r.section === 'parked').length
+  return { ...data, rows, counts, label: formatNavLabel(counts.waiting) }
 }
 
 function useParking() {
@@ -843,6 +878,35 @@ function ParkedArea({ rows, onUnpark }) {
 
 const EMPTY = { waiting: 'Nothing waits for you.', running: 'Nothing is running.', blocked: 'Nothing is blocked.' }
 
+export const ALL_REPOS = 'all'
+
+// One filter button per repository with rows in Waiting for me (parked rows not counted), sorted by name so a
+// click never moves a button. The owner is left out of the label when every repository shares one.
+export function repoButtons(rows) {
+  const counts = new Map()
+  for (const r of rows || []) {
+    if (r.tab === 'waiting' && r.section !== 'parked' && r.repo) counts.set(r.repo, (counts.get(r.repo) || 0) + 1)
+  }
+  const repos = [...counts.keys()].sort((a, b) => a.localeCompare(b))
+  const owners = new Set(repos.map(repo => repo.split('/')[0]))
+  return repos.map(repo => ({ repo, count: counts.get(repo), label: owners.size === 1 && repo.includes('/') ? repo.slice(repo.indexOf('/') + 1) : repo }))
+}
+
+// The filter in force: the chosen repository while it still has a button, otherwise All. With fewer than two
+// repositories no filter row shows, so All.
+export function pickRepo(buttons, chosen) {
+  return chosen !== ALL_REPOS && buttons.length > 1 && buttons.some(b => b.repo === chosen) ? chosen : ALL_REPOS
+}
+
+function RepoFilter({ buttons, active, total, onPick }) {
+  const pick = (id, label, count, title) => el(Button, {
+    key: id, 'aria-pressed': active === id, onClick: () => onPick(id), size: 'xs', title, variant: active === id ? 'default' : 'chip', 'data-test': 'repo-filter', 'data-repo': id
+  }, label + ' · ' + count)
+  return el('div', { role: 'group', 'aria-label': 'Filter by repository', style: S.row(6), 'data-test': 'repo-filters' },
+    pick(ALL_REPOS, 'All', total),
+    ...buttons.map(b => pick(b.repo, b.label, b.count, b.repo)))
+}
+
 // Without the setting you, Waiting for me cannot know whose review requests to list. One click sets it
 // when the backend knows the login; "Open settings" opens Hermes' own form for another login.
 function WhoAreYou({ login, onDone }) {
@@ -873,11 +937,17 @@ function Notes({ notes }) {
   return el('div', { style: S.col(2), 'data-test': 'notes' }, ...notes.map(n => el('div', { key: n, style: { ...S.small, color: T.yellow } }, n)))
 }
 
-function RowList({ rows, tab, setTab, onMerge, note, blocked, canMerge, onPark, you, canComment }) {
+function RowList({ rows, tab, setTab, onMerge, note, blocked, canMerge, onPark, you, canComment, repo, setRepo }) {
   const { unpark } = useParking()
-  const all = rows.filter(r => r.tab === tab)
+  const buttons = tab === 'waiting' ? repoButtons(rows) : []
+  const active = pickRepo(buttons, repo)
+  useEffect(() => {
+    if (tab === 'waiting' && active !== repo) setRepo(active)
+  }, [tab, active, repo, setRepo])
+  const all = rows.filter(r => r.tab === tab && (active === ALL_REPOS || r.repo === active))
   const mine = all.filter(r => r.section !== 'parked')
   const parked = tab === 'waiting' ? all.filter(r => r.section === 'parked') : []
+  const filters = buttons.length > 1 ? el(RepoFilter, { active, buttons, onPick: setRepo, total: buttons.reduce((n, b) => n + b.count, 0) }) : null
   const top = tab === 'waiting' ? el(WaitingNote, { note }) : null
   const area = parked.length ? el(ParkedArea, { onUnpark: unpark, rows: parked }) : null
   if (!mine.length) {
@@ -887,13 +957,175 @@ function RowList({ rows, tab, setTab, onMerge, note, blocked, canMerge, onPark, 
       tab === 'waiting' && blocked ? el('div', { style: { display: 'flex', justifyContent: 'center' } }, el(Button, { onClick: () => setTab('blocked'), size: 'sm', variant: 'secondary' }, 'Show blocked')) : null,
       area)
   }
-  return el('div', { style: S.col(10) }, top, ...mine.map(r => el(Row, { key: r.id, canComment, canMerge, onMerge, onPark, row: r, you })), area)
+  return el('div', { style: S.col(10) }, top, filters, ...mine.map(r => el(Row, { key: r.id, canComment, canMerge, onMerge, onPark, row: r, you })), area)
 }
 
-// Every repo Hermes' account sees, one line each. A badge only for what differs from the usual
-// (write access, no flow, mentions answered).
-function Repos({ repos, error, forgeUrl, onRetry }) {
+// ── the Repos tab (feedback 2026-11-12, FB-3): list or grid, open pull requests that expand, actions per repo ──
+
+export const LAYOUTS = ['list', 'grid']
+const LAYOUT_KEY = profile => 'forgebruecke:repos-layout:' + (profile || 'default')
+// 20rem cards: 3 per row in a 1280 px window, 4 from 1600 px (run-fb3.cjs measures both). The cards of one row
+// stretch to one height, and the count line sits at the bottom of each (marginTop auto in RepoCard), so a badge
+// on one card does not lift its neighbours' count lines.
+const GRID = { display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fill, minmax(20rem, 1fr))', alignItems: 'stretch' }
+
+export function readLayout(stored) {
+  return LAYOUTS.includes(stored) ? stored : 'list'
+}
+
+function useLayout() {
+  const profile = useProfile()
+  const [layout, setLayout] = useState(() => {
+    try {
+      return readLayout(window.localStorage.getItem(LAYOUT_KEY(profile)))
+    } catch {
+      return 'list'
+    }
+  })
+  const choose = next => {
+    setLayout(readLayout(next))
+    try {
+      window.localStorage.setItem(LAYOUT_KEY(profile), readLayout(next))
+    } catch {
+      /* the choice holds until the page reloads */
+    }
+  }
+  return [layout, choose]
+}
+
+export const REPO_QUESTION = 'What changed here this week?'
+
+export function repoAskDraft(repo) {
+  return '@forgejo:' + repo + ' ' + REPO_QUESTION
+}
+
+// Rows in Waiting for me per repository, parked rows not counted: the same numbers as the filter buttons.
+export function waitingByRepo(rows) {
+  const out = {}
+  for (const b of repoButtons(rows)) out[b.repo.toLowerCase()] = b.count
+  return out
+}
+
+// "<n> waiting for you": Waiting for me, filtered to this repository.
+export function showWaiting(repo, setTab, setRepo) {
+  setRepo(repo)
+  setTab('waiting')
+}
+
+// The desk answer right after a merge from anywhere on the page: the row leaves Waiting for me (withoutRow) and the
+// repo's open pull request count drops by one, before the refetch.
+export function withMerged(data, row) {
+  if (!data) return data
+  const next = withoutRow(data, row.id) || data
+  if (!next.repos || !row.repo) return next
+  const repo = row.repo.toLowerCase()
+  return { ...next, repos: next.repos.map(c => (c.repo.toLowerCase() === repo ? { ...c, open_prs: Math.max(0, (Number(c.open_prs) || 0) - 1) } : c)) }
+}
+
+// The expanded repo's answer after the same merge: the pull request leaves the list.
+export function withoutPull(data, id) {
+  if (!data || !data.pulls) return data
+  return { ...data, pulls: data.pulls.filter(p => p.id !== id) }
+}
+
+const prWord = n => n + (n === 1 ? ' open pull request' : ' open pull requests')
+
+function useRepoPulls(repo, enabled) {
+  const profile = useProfile()
+  return useQuery({ queryKey: qk(profile, 'repo-pulls', repo.toLowerCase()), queryFn: () => rest('/repo-pulls?repo=' + encodeURIComponent(repo)), enabled, staleTime: 15000, retry: retryOnce })
+}
+
+// The default branch's latest commit and its checks, one line.
+function BranchLine({ branch, name }) {
+  if (!branch) return el('div', { style: S.small, 'data-test': 'branch' }, (name || 'The default branch') + ': its latest commit could not be read.')
+  const state = (branch.checks && branch.checks.state) || 'none'
+  const failing = ((branch.checks && branch.checks.statuses) || []).filter(s => s.state === 'failure' || s.state === 'error').length
+  const [icon, color] = state === 'none' ? ['circle-large-outline', T.tertiary] : CHECK_ICON[state] || ['circle-large-outline', T.tertiary]
+  const said = state === 'none' ? 'no checks' : state === 'success' ? 'checks pass' : failing ? failing + (failing === 1 ? ' check fails' : ' checks fail') : 'checks ' + state
+  return el('div', { style: { ...S.line(6), fontSize: '0.75rem', color: T.primary }, 'data-test': 'branch', 'data-state': state },
+    el(Codicon, { name: icon, size: '0.85rem', style: { color } }),
+    el('span', { style: S.mono }, branch.name),
+    el('button', { className: 'fb-link', onClick: () => openExternal(branch.url), style: { ...S.mono, color: T.secondary }, title: 'Open the commit in Forgejo', type: 'button' }, branch.sha.slice(0, 7)),
+    el('span', { style: { color: T.secondary } }, said))
+}
+
+// One open pull request inside an expanded repo: title, author, age, checks; Merge (the desk's rule), the link and
+// Ask Hermes in the same narrow column as the Waiting rows.
+function RepoPull({ pull, onMerge, tab }) {
+  const row = { ...pull, tab }
+  const full = { width: '100%' }
+  return el('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 12, padding: '8px 0', borderTop: '1px solid ' + T.strokeSoft }, 'data-test': 'repo-pull', 'data-number': pull.number },
+    el('div', { style: { ...S.col(4), flex: 1, minWidth: 0 } },
+      el('button', { className: 'fb-link text-sm', onClick: () => openExternal(pull.url), style: { color: T.primary }, title: 'Open in Forgejo', type: 'button' }, '#' + pull.number + ' ' + pull.title),
+      el('div', { style: S.small }, [pull.author ? 'by ' + pull.author : '', pull.age_s != null ? ago(pull.age_s) : '', pull.draft ? 'draft' : '', pull.flow ? 'flow ' + pull.flow : ''].filter(Boolean).join(' · ')),
+      el(Checks, { checks: pull.checks })),
+    el('div', { style: { ...S.col(4), alignItems: 'stretch', flex: 'none', width: '9.5rem' }, 'data-test': 'actions' },
+      pull.can_merge ? el(Button, { className: 'fb-merge', onClick: () => onMerge(row), size: 'xs', style: full, 'data-test': 'merge' }, el(Codicon, { name: 'git-merge', size: '0.75rem' }), MOVE.merge) : null,
+      el(Button, { disabled: !pull.url, onClick: () => openExternal(pull.url), size: 'xs', style: full, variant: 'secondary', 'data-test': 'open' }, el(Codicon, { name: 'link-external', size: '0.75rem' }), MOVE.open_in_forgejo),
+      el(AskHermes, { row })))
+}
+
+function RepoPulls({ repo, onMerge, tabs }) {
+  const q = useRepoPulls(repo, true)
+  if (q.isLoading) return el('div', { style: S.col(6), 'data-test': 'repo-pulls-loading' }, el(Skeleton, { style: { height: 18 } }), el(Skeleton, { style: { height: 48 } }))
+  if (q.isError || (q.data && q.data.ok === false)) {
+    const message = q.isError ? q.error.message : q.data.message
+    return el('div', { style: { ...S.row(8), ...S.small }, 'data-test': 'repo-pulls-error' }, 'Not read: ' + message, el(Button, { onClick: () => q.refetch(), size: 'xs', variant: 'ghost' }, 'Try again'))
+  }
+  const data = q.data
+  return el('div', { style: S.col(4), 'data-test': 'repo-pulls' },
+    el(BranchLine, { branch: data.branch, name: data.default_branch }),
+    data.pulls.length
+      ? el('div', { style: S.col(0) }, ...data.pulls.map(p => el(RepoPull, { key: p.id, onMerge, pull: p, tab: tabs[p.id] || 'open' })))
+      : el('div', { style: { ...S.small, paddingTop: 6 }, 'data-test': 'repo-pulls-none' }, 'No open pull requests.'),
+    data.has_more ? el('div', { style: S.small }, 'The newest ' + data.pulls.length + ' are listed. Open the repo for the rest.') : null)
+}
+
+// One repo, as a line (list) or a card (grid). The open pull request count expands the repo in place; an expanded
+// card spans the whole grid row so its pull requests get the width of a Waiting row.
+function RepoCard({ card, layout, open, onToggle, waiting, onWaiting, onMerge, tabs }) {
+  const n = Number(card.open_prs) || 0
+  const badges = [
+    card.right === 'read' ? el(Badge, { key: 'read', variant: 'muted', 'data-test': 'right' }, 'read only') : null,
+    ...(card.flows || []).map(f => el(Badge, { key: 'flow-' + f, variant: 'success' }, 'flow ' + f)),
+    !card.mentions && card.right !== 'read' ? el(Badge, { key: 'mentions', variant: 'muted' }, 'mentions off') : null
+  ].filter(Boolean)
+  const name = el('button', { className: 'fb-link', onClick: () => openExternal(card.url), style: { ...S.mono, ...S.clip, fontSize: '0.75rem', color: T.primary }, title: 'Open in Forgejo', type: 'button', 'data-test': 'repo-name' }, card.repo)
+  const expander = el('button', { 'aria-expanded': open, className: 'fb-press', onClick: onToggle, style: { ...S.line(4), ...S.small, padding: '2px 6px 2px 2px', flex: 'none' }, type: 'button', 'data-test': 'repo-expand' },
+    el(DisclosureCaret, { open, size: '0.625rem' }), n > 0 ? prWord(n) : 'No open pull requests')
+  const jump = waiting > 0
+    ? el(Button, { onClick: onWaiting, size: 'xs', variant: 'chip', 'data-test': 'repo-waiting' }, el(Codicon, { name: 'person', size: '0.75rem' }), waiting + ' waiting for you')
+    : null
+  const icon = (name_, label, onClick, test) => el(Tip, { label }, el(Button, { 'aria-label': label, onClick, size: 'xs', variant: 'ghost', 'data-test': test }, el(Codicon, { name: name_, size: '0.75rem' })))
+  const actions = el('div', { style: { ...S.line(2), flex: 'none' } },
+    icon('comment-discussion', 'Ask Hermes about this repo', () => openChat(repoAskDraft(card.repo)), 'repo-ask'),
+    icon('link-external', 'Open in Forgejo', () => openExternal(card.url), 'repo-open'),
+    icon('organization', 'Change access', () => openExternal(card.collaboration_url), 'repo-access'))
+  const pulls = open ? el(RepoPulls, { onMerge, repo: card.repo, tabs }) : null
+  if (layout === 'grid') {
+    return el('div', { style: { ...S.card, gap: 6, ...(open ? { gridColumn: '1 / -1' } : {}) }, 'data-test': 'repo', 'data-repo': card.repo, 'data-right': card.right, 'data-open': open ? 'true' : 'false' },
+      el('div', { style: { ...S.line(6), justifyContent: 'space-between' } }, name, actions),
+      badges.length ? el('div', { style: S.row(4) }, ...badges) : null,
+      el('div', { style: { ...S.row(6), justifyContent: 'space-between', marginTop: 'auto' }, 'data-test': 'repo-count' }, expander, jump),
+      pulls)
+  }
+  return el('div', { style: { ...S.col(4), padding: '4px 8px', borderRadius: 6, ...(open ? { background: T.fill } : {}) }, className: open ? undefined : 'fb-repo', 'data-test': 'repo', 'data-repo': card.repo, 'data-right': card.right, 'data-open': open ? 'true' : 'false' },
+    el('div', { style: S.line(8) },
+      name,
+      ...badges,
+      el('span', { style: { flex: 1 } }),
+      jump,
+      expander,
+      actions),
+    pulls ? el('div', { style: { paddingLeft: 14 } }, pulls) : null)
+}
+
+// Every repo Hermes' account sees. A badge only for what differs from the usual (write access, no flow, mentions
+// answered).
+function Repos({ repos, error, forgeUrl, onRetry, rows, setTab, setRepo, onMerge }) {
   const [query, setQuery] = useState('')
+  const [layout, setLayout] = useLayout()
+  const [open, setOpen] = useState({})
   if (error) {
     return el('div', { style: S.col(8), 'data-test': 'empty' },
       el(EmptyState, { title: error }),
@@ -906,20 +1138,25 @@ function Repos({ repos, error, forgeUrl, onRetry }) {
   }
   const needle = query.trim().toLowerCase()
   const shown = needle ? repos.filter(r => r.repo.toLowerCase().includes(needle)) : repos
-  return el('div', { style: S.col(8) },
+  const waiting = waitingByRepo(rows)
+  const tabs = {}
+  for (const r of rows || []) tabs[r.id] = r.section === 'parked' ? 'parked' : r.tab
+  const cards = shown.map(r => el(RepoCard, {
+    key: r.repo, card: r, layout, onMerge, tabs,
+    open: Boolean(open[r.repo]),
+    onToggle: () => setOpen({ ...open, [r.repo]: !open[r.repo] }),
+    waiting: waiting[r.repo.toLowerCase()] || 0,
+    onWaiting: () => showWaiting(r.repo, setTab, setRepo)
+  }))
+  return el('div', { style: S.col(10) },
     el('div', { style: { ...S.row(12), justifyContent: 'space-between' } },
       el('div', { style: S.small }, 'Hermes can do in a repo what its account may do in Forgejo.'),
-      repos.length > FILTER_ABOVE ? el('div', { style: { width: '15rem', maxWidth: '100%' } }, el(SearchField, { onChange: setQuery, placeholder: 'Filter repos', value: query, variant: 'box' })) : null),
+      el('div', { style: S.row(10) },
+        repos.length > FILTER_ABOVE ? el('div', { style: { width: '15rem', maxWidth: '100%' } }, el(SearchField, { onChange: setQuery, placeholder: 'Filter repos', value: query, variant: 'box' })) : null,
+        el('div', { 'data-test': 'repos-layout', 'data-layout': layout },
+          el(SegmentedControl, { onChange: setLayout, options: [{ id: 'list', label: 'List' }, { id: 'grid', label: 'Grid' }], sizing: 'content', value: layout })))),
     shown.length
-      ? el('div', { style: S.col(0) },
-        ...shown.map(r => el('div', { key: r.repo, className: 'fb-repo', style: { ...S.line(8), padding: '5px 8px' }, 'data-test': 'repo', 'data-right': r.right },
-          el('button', { className: 'fb-link', onClick: () => openExternal(r.url), style: { ...S.mono, ...S.clip, fontSize: '0.75rem', color: T.primary }, title: 'Open in Forgejo', type: 'button' }, r.repo),
-          r.right === 'read' ? el(Badge, { variant: 'muted', 'data-test': 'right' }, 'read only') : null,
-          ...(r.flows || []).map(f => el(Badge, { key: f, variant: 'success' }, 'flow ' + f)),
-          !r.mentions && r.right !== 'read' ? el(Badge, { variant: 'muted' }, 'mentions off') : null,
-          r.open_prs > 0 ? el('span', { style: S.small }, r.open_prs + (r.open_prs === 1 ? ' open pull request' : ' open pull requests')) : null,
-          el('span', { style: { flex: 1 } }),
-          el(Button, { onClick: () => openExternal(r.collaboration_url), size: 'xs', variant: 'ghost' }, 'Change access'))))
+      ? el('div', { style: layout === 'grid' ? GRID : S.col(0), 'data-test': 'repos', 'data-layout': layout }, ...cards)
       : el('div', { style: { ...S.small, padding: '5px 8px' } }, 'No repo matches “' + query.trim() + '”.'))
 }
 
@@ -930,11 +1167,21 @@ function MergeDialog({ row, onClose }) {
   const run = async () => {
     const result = await rest('/merge', { method: 'POST', body: { repo: row.repo, number: row.number, head_sha: row.head_sha } })
     if (!result || !result.ok) throw new Error((result && result.message) || 'Not merged.')
+    const key = qk(profile, 'desk')
+    const next = withMerged(client.getQueryData(key), row)
+    if (next) {
+      client.setQueryData(key, next)
+      showCount(next)
+    }
+    const pullsKey = qk(profile, 'repo-pulls', row.repo.toLowerCase())
+    const pulls = withoutPull(client.getQueryData(pullsKey), row.id)
+    if (pulls) client.setQueryData(pullsKey, pulls)
     host.notify({ kind: 'success', message: result.message })
-    await client.invalidateQueries({ queryKey: qk(profile, 'desk') })
+    void client.invalidateQueries({ queryKey: key })
+    void client.invalidateQueries({ queryKey: pullsKey })
   }
   return el(ConfirmDialog, {
-    children: el('div', { style: S.col(4) },
+    children: el('div', { className: 'fb-merge-dialog', style: S.col(4) },
       el('div', { style: { fontSize: '0.75rem', color: T.primary } }, row.title),
       el('div', { style: S.small }, row.repo + ' #' + row.number + ', commit ', el('span', { style: S.mono }, row.head_sha.slice(0, 12)), ' into ' + (row.base || 'the base branch'))),
     confirmLabel: 'Merge as me',
@@ -991,6 +1238,7 @@ function DeskBody() {
   const client = useQueryClient()
   const profile = useProfile()
   const [tab, setTab] = useState('waiting')
+  const [repo, setRepo] = useState(ALL_REPOS)
   const [merging, setMerging] = useState(null)
   const [parking, setParking] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
@@ -1031,7 +1279,7 @@ function DeskBody() {
       el(VersionNote, { version: data.version }),
       data.forge_error ? el('div', { style: { ...S.small, color: T.yellow }, 'data-test': 'forge-error' }, data.forge_error) : null,
       el(Notes, { notes: data.notes }),
-      tab === 'repos' ? el(Repos, { error: data.repos_error, forgeUrl: data.forge_url, onRetry: refresh, repos }) : el(RowList, { blocked: counts.blocked > 0, canComment: Boolean(data.can_comment), canMerge: Boolean(data.can_merge), note: data.waiting_note, onMerge: setMerging, onPark: setParking, rows: data.rows || [], setTab, tab, you: data.you }),
+      tab === 'repos' ? el(Repos, { error: data.repos_error, forgeUrl: data.forge_url, onMerge: setMerging, onRetry: refresh, repos, rows: data.rows || [], setRepo, setTab }) : el(RowList, { blocked: counts.blocked > 0, canComment: Boolean(data.can_comment), canMerge: Boolean(data.can_merge), note: data.waiting_note, onMerge: setMerging, onPark: setParking, repo, rows: data.rows || [], setRepo, setTab, tab, you: data.you }),
       merging ? el(MergeDialog, { onClose: () => setMerging(null), row: merging }) : null,
       parking ? el(ParkDialog, { canComment: Boolean(data.can_comment), onClose: () => setParking(null), row: parking, you: data.you }) : null)
   }

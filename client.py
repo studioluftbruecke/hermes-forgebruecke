@@ -50,6 +50,41 @@ _VERSION_RE = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+))?")
 
 Transport = Callable[[str, str, dict, Optional[bytes], float], "tuple[int, dict, bytes]"]
 
+# Reads the desk keeps in flight at once. Its time went into waiting for one answer after another (measured:
+# 46 sequential reads, 10.6 s on the live Forgejo; experiments/forgebruecke/desk-load-time). 4 at once was the
+# fastest there, and more made each answer slower without a faster desk.
+PARALLEL_READS = 4
+
+
+def parallel_map(fn: Callable[[Any], Any], items: Any, limit: Optional[int] = None) -> list:
+    """``[fn(x) for x in items]`` in order, with at most ``limit`` (default PARALLEL_READS) calls running at once.
+    The first exception in item order is raised, as the plain loop would raise it. Unlike the plain loop, the
+    calls already running when an item fails still finish (at most ``limit - 1``, each with its own retries);
+    no call starts after the failure, so a 429 does not send the rest of the reads."""
+    items = list(items)
+    limit = PARALLEL_READS if limit is None else limit
+    if len(items) < 2 or limit < 2:
+        return [fn(x) for x in items]
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    failed = threading.Event()
+
+    def one(x: Any) -> Any:
+        if failed.is_set():
+            raise _Skipped()
+        try:
+            return fn(x)
+        except BaseException:
+            failed.set()
+            raise
+
+    with ThreadPoolExecutor(max_workers=min(limit, len(items)), thread_name_prefix="forgebruecke-read") as pool:
+        return list(pool.map(one, items))
+
+
+class _Skipped(Exception):
+    """An item ``parallel_map`` did not start because an earlier one failed; its error is raised first."""
+
 
 class ForgejoError(Exception):
     """A request the forge refused or could not answer. ``message`` is written for the user.

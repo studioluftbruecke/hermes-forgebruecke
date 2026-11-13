@@ -380,6 +380,9 @@ class FakeForgejo:
             return self._json(200, combined if rest[2] == "status" else combined["statuses"])
         if len(rest) >= 2 and rest[0] == "branches":
             b = data.get("branches", {}).get("/".join(rest[1:]))
+            if b and "user_can_merge_by" in b:  # Forgejo answers for the caller: his right and the branch rule
+                b = {**b, "user_can_merge": b["user_can_merge_by"].get(acct["user"]["login"], False)}
+                del b["user_can_merge_by"]
             return self._json(200, b) if b else nf
         if len(rest) == 3 and rest[:2] == ["git", "commits"]:
             sha = rest[2].lower()
@@ -465,3 +468,25 @@ class DictState:
     def set(self, key, value):
         json.dumps(value)  # same rule as Hermes: values must be JSON
         self.data[key] = value
+
+
+def open_flow_prs(f: "FakeForgejo", *states) -> None:
+    """Lists the pull request of every stored flow state that is not closed as open on the fake, as Forgejo
+    does while a flow runs on it (the desk drops a flow row that a complete scan no longer lists)."""
+    for st in states:
+        if st.get("closed") or st.get("merged"):
+            continue
+        repo, n = st["repo"], int(st["pr"])
+        d = f.data.setdefault(repo, {})
+        if n in d.setdefault("pulls", {}):
+            continue
+        url = st.get("url") or f"{BASE}/{repo}/pulls/{n}"
+        d["pulls"][n] = {"number": n, "title": st.get("title") or f"PR {n}", "state": "open", "draft": False,
+                         "merged": False, "mergeable": True, "user": _user("hermes"), "html_url": url,
+                         "base": {"ref": st.get("base") or "main"},
+                         "head": {"ref": st.get("head_ref") or f"flow-{n}", "sha": st.get("head_sha") or HEAD_SHA},
+                         "requested_reviewers": [], "updated_at": "2026-11-08T11:00:00Z"}
+        d.setdefault("issues", {})[n] = {"number": n, "title": d["pulls"][n]["title"], "state": "open",
+                                         "user": _user("hermes"), "labels": [], "html_url": url,
+                                         "pull_request": {"merged": False, "draft": False, "html_url": url},
+                                         "repository": {"full_name": repo}}

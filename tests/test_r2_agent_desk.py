@@ -2,7 +2,7 @@
 import argparse
 import json
 
-from fb_fakes import BASE, DEMO, HEAD_SHA, DictState, sub
+from fb_fakes import BASE, DEMO, HEAD_SHA, DictState, open_flow_prs, sub
 from fb_fakes_tools_read import OTHER, kit, plugin
 
 state_mod = sub("flows.state")
@@ -22,6 +22,7 @@ def desk(tmp_path, args=None, *, prs=(), settings=None, engine=None):
     if engine:
         store.write_engine(engine)
     forge, gs, sec = kit(settings={"you": "acme", **(settings or {})})
+    open_flow_prs(forge, *store.all_prs())
     handler = plugin.make_read_handler("forge_list", gs, sec, transport=forge, data_dir=tmp_path)
     return json.loads(handler({"kind": "desk", **(args or {})})), forge
 
@@ -73,6 +74,7 @@ def test_the_terminal_says_how_many_rows_it_left_out(tmp_path, capsys):
     for n in range(10, 70):
         store.save_pr(flow_pr(n))
     forge, gs, sec = kit(settings={"you": "acme"})
+    open_flow_prs(forge, *store.all_prs())
     handler = plugin.make_cli_handler(gs, sec, state=DictState(tmp_path), transport=forge)
     assert handler(argparse.Namespace(forgebruecke_command="desk", json=False)) == 0
     lines = capsys.readouterr().out.strip().splitlines()

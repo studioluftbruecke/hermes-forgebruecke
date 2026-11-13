@@ -64,7 +64,7 @@ def test_the_pane_label_rule_matches_the_backend(n, label):
 
 
 def test_the_merge_button_is_drawn_only_from_the_backend_flag():
-    assert "row.next === 'merge' ? el(Button" in SOURCE and "row.can_merge && row.next !== 'merge'" in SOURCE
+    assert "const merge = row.can_merge || row.next === 'merge'" in SOURCE and "const link = row.next === 'merge' ? null" in SOURCE
     assert "rest('/merge', { method: 'POST', body: { repo: row.repo, number: row.number, head_sha: row.head_sha } })" in SOURCE
 
 
@@ -88,7 +88,7 @@ def test_ask_hermes_drafts_a_reference_and_never_sends():
     for sentence in ("Summarise this pull request.", "What should I check before I merge this?",
                      "Why is this blocked, and what fixes it?", "Fix what the review asked for."):
         assert f"'{sentence}'" in ask
-    assert "'@forgejo:' + row.repo + '#' + row.number + ' ' + sentence" in ask
+    assert "return '@forgejo:' + row.repo + '#' + row.number + ' ' + (sentence || '')" in ask
     chat = part("async function openChat(text)", "const QUESTIONS")
     assert "tabTitle: CHAT_TITLE" in chat and "storage.get(storageKey, null)" in chat and "host.newChat" in chat
     assert "const CHAT_TITLE = 'Forgebrücke'" in SOURCE  # D5 of the sidebar-rows plan (0.0.22)
@@ -100,8 +100,9 @@ def test_the_you_note_offers_the_login_in_one_click_and_the_repos_tab_follows_th
     who = part("function WhoAreYou(", "function WaitingNote(")
     assert "save('you', login)" in who and "'Use @' + login" in who and "'Open settings'" in who
     repos = part("function Repos(", "function MergeDialog(")
-    for field in ("r.collaboration_url", "r.open_prs > 0", "r.mentions", "r.flows", "r.right === 'read'"):
-        assert field in repos, field
+    card = part("function RepoCard(", "function Repos(")  # FB-3: the per-repo fields moved into the card
+    for field in ("card.collaboration_url", "card.open_prs", "card.mentions", "card.flows", "card.right === 'read'"):
+        assert field in card, field
     assert "SearchField" in repos and "repos.length > FILTER_ABOVE" in repos and "const FILTER_ABOVE = 8" in SOURCE
 
 

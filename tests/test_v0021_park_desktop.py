@@ -71,7 +71,7 @@ def test_the_collapse_is_kept_per_profile_and_open_by_default():
 
 
 def test_the_comment_icon_shows_only_when_his_token_can_comment():
-    row = part("function Row(", "// ── the parking area")
+    row = part("function RowActions(", "// ── the parking area")
     assert "canComment && you && row.tab === 'waiting'" in row and "el(Tip, { label: PARK.commentTip(you) }" in row
     assert "name: 'comment'" in row and "name: 'archive'" in row and "row.back ? PARK.again : PARK.park" in row
 

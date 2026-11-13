@@ -13,7 +13,8 @@ Open a GitHub issue on this repo.
   names and tokens first.
 - **Feature:** the job you want to get done, and why the current plugin does not do it.
 
-Issue forms come later. A plain issue is fine.
+Pick **Bug report** or **Feature request**. A plain issue is fine for anything else. A security
+problem never goes into a public issue: use **Security → Report a vulnerability** on this repo.
 
 ## Run the tests
 

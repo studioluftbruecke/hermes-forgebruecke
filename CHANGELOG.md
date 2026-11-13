@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.0.24
+
+- Merge shows on every row under Waiting for me that Forgejo lets your account merge into its target branch (your
+  repo permission and the branch's protection rule), also when nobody asked you to review it. It is the row's main
+  button then. A draft, a pull request Forgejo cannot merge yet, and a flow row whose merge waits for someone else
+  still have none. The desk asks Forgejo once per repo and branch every 5 minutes, with your write token.
+- On a row that asks for your review, "Review in Forgejo" stays the main button, with the green Merge right above it.
+  On every other row you may merge, Merge is the main button.
+- A flow row asks for the merge right on the target branch Forgejo names now, so a pull request retargeted since the
+  last flows check shows the right Merge button, and the merge dialog names the new branch.
+- A merged pull request leaves Waiting for me on the click, and the sidebar number follows. A pull request with a
+  flow also leaves at once when it was merged in Forgejo, without waiting for the next flows check.
+- The desk read after a merge no longer checks your write token's scopes again, so it answers faster.
+- Every Merge button is green: on the row and "Merge as me" in the dialog. It takes the theme's green, darkened so its
+  white text stays readable in light and dark.
+- Ask Hermes has one more item at the end, "Ask something else…". It drafts only the pull request's reference, so you
+  type your own question. Nothing is sent.
+- A row's actions stack in one narrow column at its right (Merge first), so the title and the checks get the width.
+- Waiting for me has a row of repository buttons at the top once more than one repository waits: All, then one per
+  repository with its count. A click shows only that repository's pull requests. The buttons keep their places, and
+  the choice holds through a refresh and a tab switch. When a repository's last pull request leaves, its button goes
+  and the list shows All again.
+- The Repos tab shows the repos as a list or as a grid of cards (3 per row in a 1280 px window, 4 from 1600 px). The
+  switch sits above the repos, and Desktop keeps your choice per profile.
+- Each repo shows its open pull request count. A click on it expands the repo: its default branch's latest commit
+  with its checks, then each open pull request with title, author, age, checks, Merge (the same rule and green as
+  Waiting for me), Open in Forgejo and Ask Hermes. The pull requests are read when you expand, not with the page.
+  A merge there updates the count, the list and Waiting for me on the click.
+- Each repo also has "<n> waiting for you", which opens Waiting for me filtered to that repo, and "Ask Hermes about
+  this repo", which drafts "What changed here this week?" with the repo's reference. Nothing is sent.
+- In the grid, every card of a row has the same height, and the open pull request lines sit on one level, also when
+  one card carries a badge such as "flow demo" or "read only".
+- The desk loads about three times faster. It read Forgejo one answer after another; it now keeps 4 reads in flight.
+  With 16 pull requests waiting on a real Forgejo, the desk took 10.4 s and now takes 3.7 s (median of 5 reads each),
+  with the same 46 requests. Expanding a repo in the Repos tab reads its checks the same way. The flows tick still
+  reads one at a time, so a rate limit still stops it at the first refused request. When one desk read fails (a rate
+  limit, say), the desk starts no further reads; only the up to 3 already under way finish.
+
 ## 0.0.23
 
 - "Create a reviewer profile" removes Forgebrücke's two tokens from the new profile with

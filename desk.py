@@ -42,8 +42,10 @@ there, and the row shows even when that write cannot happen. The scan and the ru
 ``review_requests.py``. Without ``you`` the desk says so (``waiting_note``) and lists flow rows only.
 
 Lanes: the desk reads in the agent lane, with the agent token, so it sees exactly what Hermes' Forgejo
-account sees. The merge button is the owner lane: his write token, on his click, and only when the
-registry says ``owner_merge`` is available and a flow's human gate waits; every other row links to Forgejo.
+account sees. The merge button is the owner lane: his write token, on his click. A Waiting row offers it
+when the registry says ``owner_merge`` is available and Forgejo says his account may merge into the row's
+base branch (``merge_right``); a flow row also needs its human gate to wait for him. Every other row links
+to Forgejo.
 """
 from __future__ import annotations
 
@@ -65,6 +67,7 @@ MOVES = ("merge", "merge_in_forgejo", "review_in_forgejo", "open_in_forgejo")
 DESK_TTL_S = 15
 SETTINGS_TTL_S = 60
 WRITE_TOKEN_TTL_S = 3600
+MERGE_RIGHT_TTL_S = 300
 LATE_TICKS = 3
 LATE_FLOOR_S = 600
 MAX_COMMENT = 140
@@ -84,6 +87,7 @@ pushes, no comments, no other files. If you cannot decide, write fail with the r
 _SEGMENT = {"passed": "done", "skipped": "done", "running": "running", "pending": "pending",
             "waiting": "waiting", "failed": "failed", "error": "failed", "blocked": "failed"}
 _cache: dict = {}
+_generation = 0  # bumped by every clear: a build that began before a clear is not cached
 _lock = threading.Lock()
 
 
@@ -118,13 +122,15 @@ def tab_of(st: dict, *, you: Optional[str] = None) -> Optional[str]:
     return "running"
 
 
-def _move(mine: bool, flow: Any, can_merge: bool) -> str:
-    """A row's main button (one of ``MOVES``). ``mine``: the row sits under Waiting for me."""
+def _move(mine: bool, flow: Any, can_merge: bool, *, asked: bool = False) -> str:
+    """A row's main button (one of ``MOVES``). ``mine``: the row sits under Waiting for me. ``asked``: the
+    row is there because his review was requested; it keeps Review in Forgejo, and Merge (when he may) sits
+    above it in the stack."""
     if not mine:
         return "open_in_forgejo"
-    if not flow:
-        return "review_in_forgejo"
-    return "merge" if can_merge else "merge_in_forgejo"
+    if can_merge and not asked:
+        return "merge"
+    return "merge_in_forgejo" if flow else "review_in_forgejo"
 
 
 def _human(st: dict) -> Optional[dict]:
@@ -282,12 +288,10 @@ def _review_summary(r: dict) -> Optional[str]:
     return _cap(text[:1].upper() + text[1:], 200) if text else None
 
 
-def row(st: dict, client: Any, *, can_merge: bool, now: Callable[[], float] = time.time,
-        you: Optional[str] = None) -> Optional[dict]:
+def row(st: dict, client: Any, *, now: Callable[[], float] = time.time, you: Optional[str] = None) -> Optional[dict]:
     tab = tab_of(st, you=you)
     if tab is None:
         return None
-    mine = tab == "waiting"
     repo, n, sha = st["repo"], int(st["pr"]), st.get("head_sha") or ""
     gates = [{"key": g.get("gate_key"), "type": g.get("type"), "state": g.get("state"),
               "segment": segment(g.get("state")), "detail": _cap(g.get("detail"), 200)}
@@ -300,9 +304,8 @@ def row(st: dict, client: Any, *, can_merge: bool, now: Callable[[], float] = ti
             "checks": _checks(client, repo, sha) if client is not None and sha else None,
             "last_comment": last, "wake_comment": wake,
             "waiting_on": _waiting_on(human) if (human or {}).get("state") == "waiting" else None,
-            "can_merge": bool(can_merge and mine), "updated_at": st.get("updated_at"), "mergeable": None,
-            "draft": None,
-            "next": _move(mine, st.get("flow") or True, bool(can_merge))}
+            "can_merge": False, "updated_at": st.get("updated_at"), "mergeable": None,
+            "draft": None, "next": _move(tab == "waiting", st.get("flow") or True, False)}
 
 
 def repo_cards(access: Any, rows: list, *, pulls: Optional[dict] = None) -> list:
@@ -333,38 +336,40 @@ def _epoch(iso: Any) -> Optional[int]:
         return None
 
 
-def review_rows(client: Any, you: str, known: set, can_merge: bool = False, every_pr: bool = False, *,
+def review_rows(client: Any, you: str, known: set, every_pr: bool = False, *,
                 pulls: Optional[dict] = None, now: Callable[[], float] = time.time) -> "tuple[list, list]":
     """Open pull requests that ask ``you`` to review them, and with ``every_pr`` those that should and do not
     yet, as Waiting rows without a flow, plus notes for what was cut or unreadable. ``known`` holds the
-    ids of flow rows in lower case (a flow row wins; Forgejo's names ignore case). ``can_merge``: his write token can merge, so the row offers the Merge
-    button. ``pulls`` is an ``open_pulls`` scan the caller already ran; without it the scan runs here."""
+    ids of flow rows in lower case (a flow row wins; Forgejo's names ignore case). ``build_desk`` decides
+    the Merge button. ``pulls`` is an ``open_pulls`` scan the caller already ran; without it the scan runs here."""
     rr = _mod("review_requests")
     pulls, notes = (pulls, []) if pulls is not None else rr.open_pulls(client)
-    rows = []
-    for repo, prs in pulls.items():
-        for pr in prs:
-            n = int(pr.get("number") or 0)
-            if not n or f"{repo}#{n}".lower() in known:
-                continue
-            if rr.asked(pr, you):
-                reason = rr.ASKED
-            elif every_pr and rr.needs_request(pr, you, rr.reviews_reader(client, repo, n)):
-                reason = rr.NOT_ASKED
-            else:
-                continue
-            sha = (pr.get("head") or {}).get("sha") or ""
-            last, wake = _last_comment(client, repo, n, now=now, you=you)
-            rows.append({"id": f"{repo}#{n}", "tab": "waiting", "repo": repo, "number": n,
-                         "title": pr.get("title") or f"PR #{n}", "url": pr.get("html_url") or "",
-                         "author": (pr.get("user") or {}).get("login"), "base": (pr.get("base") or {}).get("ref"),
-                         "head_ref": (pr.get("head") or {}).get("ref"), "head_sha": sha, "flow": None,
-                         "reason": reason, "gates": [],
-                         "checks": _checks(client, repo, sha) if sha else None,
-                         "last_comment": last, "wake_comment": wake, "waiting_on": None,
-                         "can_merge": bool(can_merge and reason == rr.ASKED), "next": _move(True, None, False),
-                         "updated_at": _epoch(pr.get("updated_at")), "mergeable": _mergeable(pr),
-                         "draft": _draft(pr)})
+    candidates = [(repo, pr) for repo, prs in pulls.items() for pr in prs
+                  if int(pr.get("number") or 0) and f"{repo}#{int(pr.get('number'))}".lower() not in known]
+
+    def one(item: tuple) -> Optional[dict]:
+        repo, pr = item
+        n = int(pr["number"])
+        if rr.asked(pr, you):
+            reason = rr.ASKED
+        elif every_pr and rr.needs_request(pr, you, rr.reviews_reader(client, repo, n)):
+            reason = rr.NOT_ASKED
+        else:
+            return None
+        sha = (pr.get("head") or {}).get("sha") or ""
+        last, wake = _last_comment(client, repo, n, now=now, you=you)
+        return {"id": f"{repo}#{n}", "tab": "waiting", "repo": repo, "number": n,
+                "title": pr.get("title") or f"PR #{n}", "url": pr.get("html_url") or "",
+                "author": (pr.get("user") or {}).get("login"), "base": (pr.get("base") or {}).get("ref"),
+                "head_ref": (pr.get("head") or {}).get("ref"), "head_sha": sha, "flow": None,
+                "reason": reason, "gates": [],
+                "checks": _checks(client, repo, sha) if sha else None,
+                "last_comment": last, "wake_comment": wake, "waiting_on": None,
+                "can_merge": False, "next": _move(True, None, False),
+                "updated_at": _epoch(pr.get("updated_at")), "mergeable": _mergeable(pr),
+                "draft": _draft(pr)}
+
+    rows = [r for r in _mod("client").parallel_map(one, candidates) if r is not None]
     return rows, notes
 
 
@@ -406,12 +411,24 @@ def suggest_login(client: Any, counts: dict, agent: str) -> str:
     return ""
 
 
+def merge_row(r: dict, can_merge: bool, may_merge: Optional[Callable[[str, Any], Optional[bool]]]) -> bool:
+    """Whether a row offers Merge: his write token can merge at all (``owner_merge``), the row waits for him,
+    Forgejo would take the merge (not a draft, not ``mergeable: false``), and Forgejo says his account may
+    merge into the row's base branch (``may_merge``: repo permission and branch protection). A review
+    request plays no part; a flow row waits for him only while its human gate waits for him."""
+    if not (can_merge and may_merge and r["tab"] == "waiting") or r.get("draft") or r.get("mergeable") is False:
+        return False
+    return may_merge(r["repo"], r.get("base")) is True
+
+
 def build_desk(access: Any, store: Any, *, can_merge: bool = False, now: Callable[[], float] = time.time,
-               you_hint: Optional[dict] = None, data_dir: Any = None, prune: bool = False) -> dict:
+               you_hint: Optional[dict] = None, data_dir: Any = None, prune: bool = False,
+               may_merge: Optional[Callable[[str, Any], Optional[bool]]] = None) -> dict:
     """``you_hint`` ({login, source}) is who the settings route already found the user to be; without it the
     desk asks the forge itself when ``you`` is empty. ``data_dir`` holds the parked rows (``parking.py``);
     without it nothing is parked. ``prune`` (only the page's ``GET /desk``) drops parked entries of pull
-    requests that are no longer open, and only after a complete scan."""
+    requests that are no longer open, and only after a complete scan. ``may_merge(repo, base)`` is Forgejo's
+    answer for his write token (``merge_right``); without it no row offers Merge."""
     forge_error = None
     try:
         client = access.reader()
@@ -419,8 +436,9 @@ def build_desk(access: Any, store: Any, *, can_merge: bool = False, now: Callabl
         client = None
         forge_error = NEXT_TEXT["set_token"] + " Checks, comments and review requests are missing."
     you = access.settings.you
-    rows = [r for r in (row(st, client, can_merge=can_merge, now=now, you=you) for st in store.all_prs())
+    rows = [r for r in _mod("client").parallel_map(lambda st: row(st, client, now=now, you=you), store.all_prs())
             if r is not None]
+    flow_ids = {r["id"] for r in rows}  # a parked flow row is never pruned, also once the scan drops it below
     notes: list = []
     missing: list = []  # what a failing Forgejo left out: one note for one outage
     failure: Optional[Exception] = None
@@ -429,14 +447,17 @@ def build_desk(access: Any, store: Any, *, can_merge: bool = False, now: Callabl
     complete_scan, scan_at = False, now()
     if client is not None and you:
         try:
-            pulls, notes = _mod("review_requests").open_pulls(client)
+            pulls, notes = _mod("review_requests").open_pulls(client, limit=_mod("client").PARALLEL_READS)
             complete_scan = not notes  # a cut search, a cut repo list or an unreadable repo: never prune
-            extra, _ = review_rows(client, you, {r["id"].lower() for r in rows}, can_merge=can_merge,
+            extra, _ = review_rows(client, you, {r["id"].lower() for r in rows},
                                    every_pr=access.settings.review_every_pr, pulls=pulls, now=now)
             by_id = {f"{repo}#{pr.get('number')}".lower(): pr for repo, prs in pulls.items() for pr in prs}
+            if complete_scan:  # a flow's state says open until its next tick; Forgejo's open list knows now
+                rows = [r for r in rows if r["id"].lower() in by_id]
             for r in rows:
                 pr = by_id.get(r["id"].lower())
                 r["mergeable"], r["draft"] = _mergeable(pr), _draft(pr)
+                r["base"] = ((pr or {}).get("base") or {}).get("ref") or r.get("base")  # a retarget since the tick
             rows += extra
         except Exception as exc:  # the flow rows still render when the search fails
             missing.append("review requests")
@@ -468,7 +489,7 @@ def build_desk(access: Any, store: Any, *, can_merge: bool = False, now: Callabl
         notes.append(park_mod.CORRUPT_NOTE)
     elif prune and complete_scan and data_dir:
         keep = {f"{repo}#{pr.get('number')}" for repo, prs in pulls.items() for pr in prs}
-        gone = park_mod.prune(data_dir, keep | {r["id"] for r in rows if r.get("flow")}, scan_at=scan_at, now=now)
+        gone = park_mod.prune(data_dir, keep | flow_ids, scan_at=scan_at, now=now)
         parked = {k: v for k, v in parked.items() if k not in gone}
     for r in rows:
         entry = parked.get(r["id"].lower()) if r["tab"] == "waiting" else None
@@ -477,10 +498,16 @@ def build_desk(access: Any, store: Any, *, can_merge: bool = False, now: Callabl
                         "wake_commits": bool(entry.get("wake_commits")), "seen": entry.get("seen"),
                         "age_s": max(0, int(now() - int(entry.get("parked_at") or 0)))} if entry else None)
         r["section"] = "parked" if entry and not r["back"] else "now"
+    rights: dict = {}  # Forgejo's merge right per (repo, base), read side by side for the rows that ask for it
+    if can_merge and may_merge:
+        pairs = sorted({(r["repo"], r["base"]) for r in rows if r["tab"] == "waiting" and r.get("base")
+                        and not r.get("draft") and r.get("mergeable") is not False})
+        rights = dict(zip(pairs, _mod("client").parallel_map(lambda pair: may_merge(*pair), pairs)))
     for r in rows:
         r["age_s"] = max(0, int(now() - r["updated_at"])) if r.get("updated_at") else None
-        if r["can_merge"] and (r.get("draft") or r.get("mergeable") is False):  # Forgejo would refuse the merge
-            r["can_merge"], r["next"] = False, _move(r["tab"] == "waiting", r.get("flow"), False)
+        r["can_merge"] = merge_row(r, can_merge, may_merge and (lambda repo, base: rights.get((repo, base))))
+        r["next"] = _move(r["tab"] == "waiting", r.get("flow"), r["can_merge"],
+                          asked=r.get("reason") == _mod("review_requests").ASKED)
         r["summary"] = summarise(r, you)
         r["review_summary"] = _review_summary(r)
     order = {t: i for i, t in enumerate(TABS)}
@@ -626,27 +653,34 @@ def _refusal_body(exc: Any) -> dict:
 
 
 def _cached(key: tuple, ttl: float, refresh: bool, make: Callable[[], dict], now: Callable[[], float]) -> dict:
+    global _generation
     with _lock:
         hit = _cache.get(key)
         if hit and not refresh and now() - hit[0] < ttl:
             return hit[1]
+        started = _generation
     value = make()
     with _lock:
-        _cache[key] = (now(), value)
+        if _generation == started:  # a clear since make() began (a merge, a park): its answer may predate it
+            _cache[key] = (now(), value)
     return value
 
 
 def clear_cache() -> None:
+    global _generation
     with _lock:
         _cache.clear()
+        _generation += 1
 
 
 def clear_desk_cache() -> None:
-    """Drop only the cached desk answers. The hour-long write-token facts stay: a park changes no token, and
-    dropping them would rerun the doctor's write-scope probes on the next desk read."""
+    """Drop only the cached desk answers. The hour-long write-token facts stay: a park or a merge changes no
+    token, and dropping them would rerun the doctor's write-scope probes on the next desk read."""
+    global _generation
     with _lock:
         for k in [k for k in _cache if k and k[0] == "desk"]:
             del _cache[k]
+        _generation += 1
 
 
 # --- the routes' functions: each returns (http_status, body) ---------------------------------------
@@ -863,6 +897,29 @@ def owner_can_merge(get_setting, get_secret, *, transport: Any = None, now: Call
     return _write_token_facts(get_setting, get_secret, transport=transport, now=now, refresh=refresh)["can_merge"]
 
 
+def merge_right(owner: Any, repo: str, base: Any, *, now: Callable[[], float] = time.time) -> Optional[bool]:
+    """Forgejo's ``user_can_merge`` on ``repo``'s branch ``base`` for the account of ``owner`` (his write
+    token's access): his repo permission and the branch's protection rule in one answer. None when Forgejo did
+    not say. Kept MERGE_RIGHT_TTL_S per token, repo and branch; an answer Forgejo did not give is not kept."""
+    if not base:
+        return None
+    token = getattr(getattr(owner, "creds", None), "owner_token", None) or ""
+    key = ("merge_right", hashlib.sha256(token.encode("utf-8")).hexdigest(), repo.lower(), str(base))
+    with _lock:
+        hit = _cache.get(key)
+        if hit and now() - hit[0] < MERGE_RIGHT_TTL_S:
+            return hit[1]
+    try:
+        found = (owner.reader().get(f"/repos/{repo}/branches/{base}").data or {}).get("user_can_merge")
+    except Exception:
+        return None
+    if not isinstance(found, bool):
+        return None
+    with _lock:
+        _cache[key] = (now(), found)
+    return found
+
+
 class _NoFlowState:
     """The flow store of an install whose data folder does not exist yet: no flow has run there."""
 
@@ -882,8 +939,9 @@ def api_desk(get_setting, get_secret, *, data_dir: Any, transport: Any = None, r
         hint = None
         if not access.settings.you and mine["login"]:
             hint = {"login": mine["login"], "source": mine["source"]}
+        owner = access.for_lane("owner")
         out = build_desk(access, store, can_merge=mine["can_merge"], now=now, you_hint=hint, data_dir=data_dir,
-                         prune=True)
+                         prune=True, may_merge=lambda repo, base: merge_right(owner, repo, base, now=now))
         return {**out, "can_comment": bool(mine.get("can_comment"))}
     try:
         body = _cached(("desk", str(data_dir)), DESK_TTL_S, refresh, make, now)
@@ -892,12 +950,87 @@ def api_desk(get_setting, get_secret, *, data_dir: Any, transport: Any = None, r
     return 200, {**body, "age_s": max(0, int(now() - body["generated_at"]))}
 
 
+REPO_PULLS_MAX = 50
+
+
+def repo_pulls(access: Any, store: Any, repo: str, *, can_merge: bool = False, now: Callable[[], float] = time.time,
+               may_merge: Optional[Callable[[str, Any], Optional[bool]]] = None) -> dict:
+    """One repo's open pull requests for the Repos tab, read when the user expands the repo: the newest
+    REPO_PULLS_MAX, each with its checks and whether Merge shows, plus the default branch's latest commit and its
+    checks. Merge follows the desk's rule (``merge_row``) for any open pull request, not only Waiting rows; a
+    pull request with a running flow offers it only while the flow's human gate waits for him, as ``/merge``
+    requires."""
+    client = access.reader()
+    info = client.get(f"/repos/{repo}").data or {}
+    page = client.paginate(f"/repos/{repo}/pulls", {"state": "open", "sort": "recentupdate"}, max_items=REPO_PULLS_MAX)
+    flows = {f"{st['repo']}#{int(st['pr'])}".lower(): st for st in store.all_prs()
+             if not st.get("closed") and not st.get("merged")}
+    you = access.settings.you
+    items = [pr for pr in page.items[:REPO_PULLS_MAX] if int(pr.get("number") or 0)]
+    shas = [(pr.get("head") or {}).get("sha") or "" for pr in items]
+    checks = _mod("client").parallel_map(lambda sha: _checks(client, repo, sha) if sha else None, shas)
+    pulls = []
+    for pr, sha, found in zip(items, shas, checks):
+        n = int(pr["number"])
+        st = flows.get(f"{repo}#{n}".lower())
+        updated = _epoch(pr.get("updated_at"))
+        p = {"id": f"{repo}#{n}", "repo": repo, "number": n, "title": pr.get("title") or f"PR #{n}",
+             "url": pr.get("html_url") or "", "author": (pr.get("user") or {}).get("login"),
+             "base": (pr.get("base") or {}).get("ref"), "head_sha": sha, "updated_at": updated,
+             "age_s": max(0, int(now() - updated)) if updated else None, "draft": _draft(pr),
+             "mergeable": _mergeable(pr), "flow": (st or {}).get("flow"), "checks": found}
+        waits = tab_of(st, you=you) == "waiting" if st else True
+        p["can_merge"] = waits and merge_row({**p, "tab": "waiting"}, can_merge, may_merge)
+        pulls.append(p)
+    name = info.get("default_branch") or "main"
+    branch = None
+    try:
+        commit = (client.get(f"/repos/{repo}/branches/{name}").data or {}).get("commit") or {}
+        sha = str(commit.get("id") or "")
+        if sha:
+            branch = {"name": name, "sha": sha, "url": info.get("html_url", "").rstrip("/") + f"/commit/{sha}"
+                      if info.get("html_url") else "", "checks": _checks(client, repo, sha)}
+    except Exception:  # the pull requests still show; the branch line says it could not be read
+        branch = None
+    return {"ok": True, "repo": repo, "url": info.get("html_url") or f"{access.settings.url.rstrip('/')}/{repo}",
+            "default_branch": name, "branch": branch, "pulls": pulls, "has_more": bool(page.has_more),
+            "can_merge": bool(can_merge), "generated_at": int(now())}
+
+
+def api_repo_pulls(get_setting, get_secret, repo: Any, *, data_dir: Any, transport: Any = None,
+                   refresh: bool = False, now: Callable[[], float] = time.time) -> "tuple[int, dict]":
+    """``GET /repo-pulls?repo=owner/name``: ``repo_pulls`` in the agent lane, kept DESK_TTL_S under a desk key, so
+    a merge or a park drops it with the desk."""
+    acc = _mod("access")
+    try:
+        name = acc.parse_repo(repo)
+    except acc.Refusal as exc:
+        return _bad(str(getattr(exc, "message", "") or "repo must be owner/name."))
+
+    def make() -> dict:
+        access = acc.load_access(get_setting, get_secret, transport=transport, lane="agent")
+        store = _mod("flows.state").FlowStore(data_dir) if data_dir else _NoFlowState()
+        mine = _write_token_facts(get_setting, get_secret, transport=transport, now=now)
+        owner = access.for_lane("owner")
+        return repo_pulls(access, store, name, can_merge=mine["can_merge"], now=now,
+                          may_merge=lambda r, base: merge_right(owner, r, base, now=now))
+    try:
+        body = _cached(("desk", str(data_dir), "pulls", name.lower()), DESK_TTL_S, refresh, make, now)
+    except Exception as exc:
+        status = getattr(exc, "status", None)
+        if status == 404:
+            return 404, {"ok": False, "error": "not_found",
+                         "message": f"Hermes' account cannot see {name}. Its open pull requests were not read."}
+        return 200, _refusal_body(exc)
+    return 200, {**body, "age_s": max(0, int(now() - body["generated_at"]))}
+
+
 def api_merge(get_setting, get_secret, body: Any, *, data_dir: Any, transport: Any = None,
               now: Callable[[], float] = time.time) -> "tuple[int, dict]":
     """The desk's merge button: the user's click, his write token (owner lane), pinned to the head SHA the
     desk showed. A pull request with a flow merges only while the flow's human gate waits for him; one
-    without a flow only while it is open and still requests his review (``you``). Forgejo's branch
-    protection and required checks apply either way."""
+    without a flow whenever it is open. Forgejo decides the rest with his account: repo permission, branch
+    protection and required checks."""
     body = body if isinstance(body, dict) else {}
     acc = _mod("access")
     try:
@@ -924,12 +1057,6 @@ def api_merge(get_setting, get_secret, body: Any, *, data_dir: Any, transport: A
         head = (pr.get("head") or {}).get("sha") or ""
         if pr.get("merged") or pr.get("state") != "open":
             return 409, {"ok": False, "error": "not_open", "message": f"{repo}#{number} is no longer open."}
-        if not flow_waiting:
-            you = str(access.settings.you or "").lower()
-            asked = {str((u or {}).get("login") or "").lower() for u in pr.get("requested_reviewers") or []}
-            if not you or you not in asked:
-                return 409, {"ok": False, "error": "not_requested", "message": f"{repo}#{number} has no flow and does "
-                             "not request your review, so the desk does not merge it. Nothing was merged."}
         if head != sha or (flow_waiting and st.get("head_sha") != sha):
             return 409, {"ok": False, "error": "head_moved", "message": f"The head moved to {head[:12]} after the desk "
                          "showed it; " + ("the flow checks the new head first." if flow_waiting else "reload the desk and look at the new commits first.") + " Nothing was merged."}
@@ -940,7 +1067,7 @@ def api_merge(get_setting, get_secret, body: Any, *, data_dir: Any, transport: A
     except Exception as exc:  # Forgejo answered with an error: say what it said
         return 502, {"ok": False, "error": "forge_error", "message": getattr(exc, "message", str(exc))}
     merged = bool(after.get("merged"))
-    clear_cache()
+    clear_desk_cache()
     note = _logged(data_dir, {"at": int(now()), "action": "merge", "repo": repo, "number": number, "head_sha": sha,
                               "merged": merged, "merge_sha": after.get("merge_commit_sha"), "lane": "owner"})
     return 200, {"ok": merged, "merged": merged, "merge_sha": after.get("merge_commit_sha"),
