@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.26
+
+- The mention channel stays off when its tool list contains `mcp` or any `mcp-*` toolset. The
+  manifest declares `kind: platform`.
+- Settings saves use stable refusal messages and prove the requested value with `hermes config get
+  --json`; startup or dependency output is never presented as the refusal reason.
+- A remote plain-HTTP Forgejo address warns that tokens travel without encryption. Local development
+  addresses keep working without that warning.
+
 ## 0.0.25
 
 A review round on security and correctness before the catalog's next review. Update both halves: the plugin where Hermes runs and the one Hermes Desktop loads.

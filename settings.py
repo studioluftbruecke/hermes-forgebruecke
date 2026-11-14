@@ -34,6 +34,7 @@ import json
 import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
 
 TOKEN_ENV = "FORGEBRUECKE_BOT_ACCOUNT_TOKEN"
 OWNER_TOKEN_ENV = "FORGEBRUECKE_PERSONAL_WRITE_TOKEN"
@@ -263,6 +264,8 @@ def load_settings(get_setting: SettingGetter, here: Optional[Callable[[], str]] 
     elif url and not url.startswith(("https://", "http://")):
         w.append(f"url: {url!r} must start with https://; ignored.")
         url = ""
+    if url.startswith("http://") and urlsplit(url).hostname not in {"localhost", "127.0.0.1", "::1"}:
+        w.append("url: plain HTTP sends Forgejo tokens without encryption; use HTTPS outside localhost.")
 
     you = str(raw("you") or "").strip().lstrip("@")
     if you and not _USER_RE.match(you):

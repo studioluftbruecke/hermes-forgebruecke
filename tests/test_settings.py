@@ -102,6 +102,15 @@ def test_url_and_paths_are_validated():
     assert len(s.warnings) == 3 and "using this profile" in s.warnings[2]
 
 
+def test_plain_http_warns_outside_loopback_without_rejecting_the_address():
+    remote = settings.load_settings(getter({"url": "http://forge.example.test"}))
+    assert remote.url == "http://forge.example.test"
+    assert len(remote.warnings) == 1 and "use HTTPS" in remote.warnings[0]
+    for url in ("http://localhost:3000", "http://127.0.0.1:3000", "http://[::1]:3000"):
+        local = settings.load_settings(getter({"url": url}))
+        assert local.url == url and local.warnings == ()
+
+
 def test_an_address_with_a_user_name_or_password_is_refused_and_never_shown():
     secret = make_token("pw")
     for url in (f"https://bot:{secret}@forge.example.test", f"http://{secret}@forge.example.test:3000/",
@@ -209,6 +218,7 @@ def test_the_manifest_drops_the_retired_fields_adds_you_and_says_the_write_token
     owner_row = next(t for t in sub("capabilities").TOKENS if t["role"] == "owner")
     assert "full access to your account" in owner_row["risk"]
     version = sub("version").VERSION
-    assert version == "0.0.25"
+    assert version == "0.0.26"
     assert re.search(r'^version: "' + re.escape(version) + '"$', manifest, re.M)
+    assert re.search(r"^kind: platform$", manifest, re.M)
     assert '"version": "' + version + '"' in (ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8")

@@ -45,7 +45,7 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 const ID = 'forgebruecke'
 // The same string as plugin.yaml (tests/test_settings.py holds them equal). The routes answer Hermes' version,
 // so the pages can say when this half is older or newer.
-export const VERSION = '0.0.25'
+export const VERSION = '0.0.26'
 const PATH = '/forgebruecke'
 const TAG = '[' + ID + ']'
 const NAV_POLL_MS = 60000

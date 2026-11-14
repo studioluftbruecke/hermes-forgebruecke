@@ -78,7 +78,7 @@ def setting_getter(config: dict):
 # Tools and Hermes toolsets that run commands, write files, start other agents or jobs, write the memory every later
 # session reads, or read the owner's past sessions. A mention turn starts on a Forgejo commenter's text, so none of
 # them may be in its toolset. Every `hermes-<platform>` bundle carries the shell; `hermes-webhook` is the one
-# read-only bundle.
+# read-only bundle. MCP toolsets are blocked too: their names do not tell us whether the server offers shell or files.
 HOST_TOOLS = frozenset({"terminal", "process_manage", "execute_code", "write_file", "patch", "delegate_task",
                         "cronjob_manage", "skill_manage", "browser_exec", "browser_cdp", "computer_use", "memory",
                         "session_search"})
@@ -88,7 +88,7 @@ HOST_TOOLSETS = frozenset({"terminal", "file", "code_execution", "debugging", "c
 
 def reaches_host(name: str) -> bool:
     name = str(name).strip().lower()
-    return (name in HOST_TOOLS or name in HOST_TOOLSETS
+    return (name in HOST_TOOLS or name in HOST_TOOLSETS or name == "mcp" or name.startswith("mcp-")
             or (name.startswith("hermes-") and name != "hermes-webhook"))
 
 

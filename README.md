@@ -6,7 +6,7 @@ account on its own feature branches, and the merge into `main` stays yours.
 
 ![The Forgejo desk in Hermes Desktop](docs/screenshot-1.png)
 
-Version 0.0.25. MIT. A Studio Luftbrücke Hermes plugin.
+Version 0.0.26. MIT. A Studio Luftbrücke Hermes plugin.
 
 ## What it does
 
@@ -120,7 +120,7 @@ Optional:
 - **Network.** Only your Forgejo, polled on your interval. The doctor also reads its
   `/swagger.v1.json`. While Desktop is visible, the desk page reads every 30 s and the settings
   page every 2 min. The sidebar count reads every minute, or your interval if longer. A hidden
-  Desktop reads nothing.
+  Desktop reads nothing. Remote HTTP URLs warn; use HTTPS outside localhost.
 - **Scope detection.** The doctor learns a token's write scopes from requests Forgejo must reject:
   empty `POST`s and a `PATCH` of a missing notification. Only the settings page checks your write token.
 - **Credentials.** Two tokens in your profile's `.env`, written by Hermes' settings. Any agent shell
@@ -141,8 +141,8 @@ Optional:
 - **Unattended agent turns.** A mention by someone with write access starts a turn without you. The
   turn gets only the tools `platform_toolsets.forgebruecke` names, reads only its thread's repo and
   cannot write through tools. Its answer is posted as Hermes' account. Issue and comment text is
-  untrusted input. A tool list with the shell, file writes, code, memory or past-session search keeps
-  the channel off. The channel posts only answers, into the thread of a mention from the last hour on
+  untrusted input. A tool list with the shell, file writes, code, memory, past-session search or an MCP
+  toolset keeps the channel off. The channel posts only answers, into the thread of a mention from the last hour on
   a repo whose rule allows mentions. A cron delivery or `send_message` aimed at it is refused.
 - **Background ticks.** While a flow or review requests are on, a loop in the Hermes gateway ticks
   every `poll_interval` seconds. A tick reads open pull requests, starts review workers and sends

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -148,14 +149,57 @@ def _as_cli_value(value: Any) -> str:
     return text
 
 
+MANAGED_REFUSAL = "Plugin settings cannot be changed in a managed install"
+ADMINISTRATOR_REFUSAL = "This plugin setting is managed by your Hermes administrator"
+LOCKED_REFUSAL = "This plugin setting is locked by Remote Config"
+NOT_SAVED = "Hermes did not save the setting; the profile's config holds another value"
+
+
+def _known_refusal(output: str) -> Optional[str]:
+    """Recognize Hermes' refusals without presenting its startup output as the reason."""
+    text = output.lower()
+    if "managed by your administrator" in text or "administrator-managed" in text:
+        return ADMINISTRATOR_REFUSAL
+    if "locked by the " in text and " level" in text:
+        return LOCKED_REFUSAL
+    if ("this hermes installation is managed" in text or "this install is managed" in text
+            or "plugin settings cannot be changed in a managed install" in text):
+        return MANAGED_REFUSAL
+    return None
+
+
+def _json_value(output: str) -> Any:
+    """One scalar from `config get --json`, tolerating a warning line before it."""
+    candidates = [output, *(line for line in reversed(output.splitlines()) if line.strip())]
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except (TypeError, ValueError):
+            continue
+    raise ValueError("config get returned no JSON value")
+
+
 def save_setting(key: str, value: Any, *, home: Path, run: Callable = subprocess.run) -> None:
-    """Write one plugin setting into the profile's config.yaml with Hermes' own `hermes config set`."""
-    env = {**os.environ, "HERMES_HOME": str(home)}
-    argv = [sys.executable, "-m", "hermes_cli.main", "config", "set", f"plugins.entries.{PLUGIN}.settings.{key}",
-            _as_cli_value(value)]
-    done = run(argv, env=env, capture_output=True, text=True, timeout=60)
+    """Write one setting with Hermes' CLI, then prove the requested value landed."""
+    env = {**os.environ, "HERMES_HOME": str(home), "HERMES_DISABLE_LAZY_INSTALLS": "1"}
+    path = f"plugins.entries.{PLUGIN}.settings.{key}"
+    done = run([sys.executable, "-m", "hermes_cli.main", "config", "set", path, _as_cli_value(value)],
+               env=env, capture_output=True, text=True, timeout=60)
+    refusal = _known_refusal(str(getattr(done, "stdout", "") or "") + "\n" + str(getattr(done, "stderr", "") or ""))
+    if refusal is not None:
+        raise PermissionError(refusal)
     if getattr(done, "returncode", 1) != 0:
-        raise RuntimeError("hermes config set failed")
+        raise PermissionError(NOT_SAVED)
+    read = run([sys.executable, "-m", "hermes_cli.main", "config", "get", path, "--json"],
+               env=env, capture_output=True, text=True, timeout=60)
+    if getattr(read, "returncode", 1) != 0:
+        raise PermissionError(NOT_SAVED)
+    try:
+        actual = _json_value(getattr(read, "stdout", ""))
+    except (TypeError, ValueError):
+        raise PermissionError(NOT_SAVED) from None
+    if type(actual) is not type(value) or actual != value:
+        raise PermissionError(NOT_SAVED)
 
 
 @router.post("/setting")

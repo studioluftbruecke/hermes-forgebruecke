@@ -22,6 +22,7 @@ def config(toolsets):
     ["hermes-cli"], ["forgebruecke", "terminal"], ["file"], ["code_execution"], ["coding"], ["debugging"],
     ["forgebruecke", "execute_code"], ["write_file"], ["patch"], ["process_manage"], ["delegation"], ["cronjob"],
     ["hermes-gateway"], ["browser"], ["memory"], ["forgebruecke", "session_search"],
+    ["mcp"], ["mcp-shell"], ["mcp-filesystem"],
 ])
 def test_a_mention_toolset_that_reaches_the_host_keeps_the_channel_off(toolsets):
     blockers = profile.channel_blockers(config(toolsets), "coding")

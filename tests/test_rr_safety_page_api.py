@@ -55,10 +55,65 @@ def test_a_name_hermes_would_read_as_a_value_is_refused_before_anything_runs(tmp
     assert ran == []
 
 
-def test_a_failed_save_raises(tmp_path):
+def test_arbitrary_cli_output_becomes_a_stable_generic_refusal(tmp_path):
     api = load_api()
-    with pytest.raises(RuntimeError):
-        api.save_setting("dry_run", True, home=tmp_path, run=lambda *a, **k: types.SimpleNamespace(returncode=1))
+    done = types.SimpleNamespace(returncode=1, stdout="preparing dependencies\n",
+                                 stderr="an arbitrary startup or dependency error\n")
+    with pytest.raises(PermissionError) as refused:
+        api.save_setting("dry_run", True, home=tmp_path, run=lambda *a, **k: done)
+    assert str(refused.value) == "Hermes did not save the setting; the profile's config holds another value"
+    assert "preparing" not in str(refused.value) and "arbitrary" not in str(refused.value)
+
+
+@pytest.mark.parametrize("output,returncode,message", [
+    ("Cannot set configuration values: this Hermes installation is managed by nix.", 0,
+     "Plugin settings cannot be changed in a managed install"),
+    ("Plugin setting 'plugins.entries.forgebruecke.settings.dry_run' is administrator-managed", 1,
+     "This plugin setting is managed by your Hermes administrator"),
+])
+def test_known_cli_refusals_have_plugin_owned_messages(tmp_path, output, returncode, message):
+    api = load_api()
+    done = types.SimpleNamespace(returncode=returncode, stdout="", stderr=output)
+    with pytest.raises(PermissionError) as refused:
+        api.save_setting("dry_run", True, home=tmp_path, run=lambda *a, **k: done)
+    assert str(refused.value) == message
+
+
+def test_an_exit_zero_without_the_requested_config_change_is_not_success(tmp_path):
+    api = load_api()
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        if "set" in argv:
+            return types.SimpleNamespace(returncode=0, stdout="preparing dependencies\n", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="true\n", stderr="")
+
+    with pytest.raises(PermissionError) as refused:
+        api.save_setting("dry_run", False, home=tmp_path, run=run)
+    assert str(refused.value) == "Hermes did not save the setting; the profile's config holds another value"
+    assert len(calls) == 2 and calls[1][-3:] == ["get", "plugins.entries.forgebruecke.settings.dry_run", "--json"]
+
+
+def test_a_real_managed_refusal_is_not_success_and_changes_nothing(tmp_path):
+    pytest.importorskip("hermes_cli.main")
+    import subprocess
+    api = load_api()
+    for name in ("cron", "sessions", "logs", "memories"):
+        (tmp_path / name).mkdir()
+    config = tmp_path / "config.yaml"
+    config.write_text("plugins:\n  enabled: [forgebruecke]\n", encoding="utf-8")
+    (tmp_path / ".managed").write_text("nix\n", encoding="utf-8")
+    before = config.read_text(encoding="utf-8")
+
+    def run(argv, **kw):
+        kw["env"] = {**kw["env"], "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)}
+        return subprocess.run(argv, **kw)
+
+    with pytest.raises(PermissionError) as refused:
+        api.save_setting("dry_run", False, home=tmp_path, run=run)
+    assert str(refused.value) == "Plugin settings cannot be changed in a managed install"
+    assert config.read_text(encoding="utf-8") == before
 
 
 def test_the_profile_config_is_read_with_hermes_own_reader(tmp_path):
